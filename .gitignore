@@ -1,0 +1,6 @@
+/target/
+/build/
+/compile_commands.json
+aqtinstall.log
+.DS_Store
+*.rs.bk

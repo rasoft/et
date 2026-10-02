@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/et-core", "crates/et-cmd"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+rust-version = "1.77"
+
+# 跨 C ABI 时不展开 Rust 栈。命令层失败用返回值表示，不用 panic 传出。
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

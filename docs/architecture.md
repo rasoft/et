@@ -193,7 +193,7 @@ P1 再加 `move_partition`、`set_start`、`set_type`。
 - Qt **5.15** Widgets，C++。使用开源的 5.15 构建；需要后续补丁时用 KDE 的 Qt 5 补丁集合，不升级到 Qt 6。
 - 不使用 Node.js，也不使用 WebView2。Windows 7 上没有可用的现行 WebView2 安装器。
 - Ubuntu 构建机安装 Qt 5 的开发包。运行期带上 Widgets 所需的 Qt 库，不依赖 WebKitGTK。
-- macOS 先交付 x86_64 构建，Apple Silicon 通过 Rosetta 运行。若要原生 arm64，单独用带苹果芯片补丁的 Qt 5.15 构建，仍然不换 Qt 6。
+- macOS 交付同时包含 x86_64 和 arm64 的通用 `.app`，并打成 `.dmg`。x86_64 使用官方 Qt 5.15.2；arm64 使用带苹果芯片支持的 Qt 5.15.2，不换 Qt 6。arm64 切片的最低系统版本是 11.0，x86_64 仍是 10.13。
 - Windows 安装包的子系统版本设为 Windows 7，并在 Windows 7 SP1 x64 上做启动验收。不支持 32 位。
 - 不在运行时下载分区类型数据库或协议描述。预设类型表编译进核心库。
 

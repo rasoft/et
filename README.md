@@ -2,7 +2,7 @@
 
 跨平台 eMMC 镜像包编辑与下载工具。面向固件与量产工程师，在 Windows、macOS、Ubuntu 上用同一套程序维护 eMMC 分区表和分区镜像，并在后续阶段把包下载到设备。
 
-当前阶段只有设计文档，还没有可运行的程序。
+当前可以编译出一个空白主窗口。分区编辑还没做。
 
 ## 文档
 
@@ -12,6 +12,18 @@
 | [架构](docs/architecture.md) | 技术选型、分层、编辑模型、下载扩展点 |
 | [包格式](docs/package-format.md) | `.etpk` 目录布局与 `manifest.json` 规范 |
 | [路线图](docs/roadmap.md) | 里程碑、交付物与建议的实现顺序 |
+
+## 构建
+
+三个平台都先建立环境，再编译。环境脚本可以重复执行。工具链钉在 Rust 1.77.2 和 Qt 5.15。依赖装在用户缓存目录，不进仓库。
+
+| 平台 | 建立环境 | 编译 |
+| --- | --- | --- |
+| Ubuntu 22.04 | `./scripts/bootstrap-ubuntu.sh` | `./scripts/build-ubuntu.sh` |
+| macOS | `./scripts/bootstrap-macos.sh` | `./scripts/build-macos.sh` |
+| Windows x64 | `powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1` | `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1` |
+
+macOS 产物是同时包含 x86_64 和 arm64 的 `build/macos/et.app` 和 `build/macos/et.dmg`。Windows 构建机使用 Visual Studio 2019（MSVC v142）；可执行文件的子系统版本是 Windows 7。可选参数 `Debug` 或 `Release`，默认 `Release`。官方下载站超时时，可以设置 `ET_QT_MIRROR` 指向带 `online` 目录的 Qt 镜像后再跑环境脚本。
 
 ## 已定结论
 
