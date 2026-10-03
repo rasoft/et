@@ -56,7 +56,7 @@ et_make_deb() {
   (
     umask 022
     set -euo pipefail
-    local root version arch stage desktop depends size deb info contents
+    local root version arch stage desktop depends size deb info contents icon_px icon_src
     root="$(et_root)"
     version="$(et_deb_version)"
     arch="$(dpkg --print-architecture)"
@@ -73,6 +73,15 @@ et_make_deb() {
     mkdir -p "${stage}/DEBIAN" "${stage}/usr/bin" "${stage}/usr/share/applications"
     install -m 755 "${bin}" "${stage}/usr/bin/et"
     install -m 644 "${desktop}" "${stage}/usr/share/applications/et.desktop"
+    for icon_px in 16 24 32 48 64 128 256 512; do
+      icon_src="${root}/src-qt/icons/hicolor/${icon_px}x${icon_px}/apps/et.png"
+      if [[ ! -f "${icon_src}" ]]; then
+        echo "找不到应用图标：${icon_src}" >&2
+        exit 1
+      fi
+      install -D -m 644 "${icon_src}" \
+        "${stage}/usr/share/icons/hicolor/${icon_px}x${icon_px}/apps/et.png"
+    done
 
     depends="$(et_deb_shlib_depends "${stage}/usr/bin/et")"
     strip --strip-unneeded "${stage}/usr/bin/et"
@@ -96,6 +105,16 @@ Description: eMMC 镜像包编辑工具
  编辑 eMMC 分区表和分区镜像。
 EOF
 
+    cat > "${stage}/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+fi
+EOF
+    cp "${stage}/DEBIAN/postinst" "${stage}/DEBIAN/postrm"
+    chmod 755 "${stage}/DEBIAN/postinst" "${stage}/DEBIAN/postrm"
+
     rm -f "${deb}"
     dpkg-deb --root-owner-group --build "${stage}" "${deb}" >&2
     rm -rf "${stage}"
@@ -113,6 +132,13 @@ EOF
       *'./usr/bin/et'*) ;;
       *)
         echo "包里没有 /usr/bin/et。" >&2
+        exit 1
+        ;;
+    esac
+    case "${contents}" in
+      *'./usr/share/icons/hicolor/48x48/apps/et.png'*) ;;
+      *)
+        echo "包里没有应用图标。" >&2
         exit 1
         ;;
     esac

@@ -8,6 +8,8 @@
   <string>et</string>
   <key>CFBundleExecutable</key>
   <string>et</string>
+  <key>CFBundleIconFile</key>
+  <string>et.icns</string>
   <key>CFBundleIdentifier</key>
   <string>local.et</string>
   <key>CFBundleInfoDictionaryVersion</key>

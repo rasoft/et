@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="16.png">icons/hicolor/16x16/apps/et.png</file>
+        <file alias="24.png">icons/hicolor/24x24/apps/et.png</file>
+        <file alias="32.png">icons/hicolor/32x32/apps/et.png</file>
+        <file alias="48.png">icons/hicolor/48x48/apps/et.png</file>
+        <file alias="64.png">icons/hicolor/64x64/apps/et.png</file>
+        <file alias="128.png">icons/hicolor/128x128/apps/et.png</file>
+        <file alias="256.png">icons/hicolor/256x256/apps/et.png</file>
+    </qresource>
+</RCC>

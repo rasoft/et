@@ -47,7 +47,8 @@ add_executable(et
   src-qt/PartitionListWidget.h
   src-qt/PartitionListWidget.cpp
   src-qt/PartitionEditorWidget.h
-  src-qt/PartitionEditorWidget.cpp)
+  src-qt/PartitionEditorWidget.cpp
+  src-qt/et.qrc)
 add_dependencies(et et_cmd_cargo)
 target_include_directories(et PRIVATE "${CMAKE_SOURCE_DIR}/crates/et-cmd/include")
 target_link_libraries(et PRIVATE et_cmd ${ET_RUST_NATIVE_LIBS} Qt5::Widgets)
@@ -67,6 +68,11 @@ if(UNIX)
 endif()
 
 if(WIN32)
+  set(ET_ICON_PATH "${CMAKE_SOURCE_DIR}/src-qt/icons/et.ico")
+  string(REPLACE "\\" "/" ET_ICON_PATH "${ET_ICON_PATH}")
+  configure_file(src-qt/et.rc.in "${CMAKE_BINARY_DIR}/et.rc" @ONLY)
+  target_sources(et PRIVATE "${CMAKE_BINARY_DIR}/et.rc")
+
   get_filename_component(_qt_kit "${Qt5_DIR}/../../.." ABSOLUTE)
   find_program(ET_WINDEPLOYQT windeployqt HINTS "${_qt_kit}/bin")
   if(ET_WINDEPLOYQT)

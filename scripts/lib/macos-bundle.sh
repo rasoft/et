@@ -95,6 +95,12 @@ et_deploy_app() {
   cp "$bin" "${dest}/Contents/MacOS/et"
   chmod +x "${dest}/Contents/MacOS/et"
   cp "$plist" "${dest}/Contents/Info.plist"
+  local icon="${root}/src-qt/icons/et.icns"
+  if [[ ! -f "${icon}" ]]; then
+    echo "找不到应用图标：${icon}" >&2
+    return 1
+  fi
+  cp "${icon}" "${dest}/Contents/Resources/et.icns"
   cat > "${dest}/Contents/Resources/qt.conf" <<'EOF'
 [Paths]
 Plugins = PlugIns
