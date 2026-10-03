@@ -192,7 +192,7 @@ P1 再加 `move_partition`、`set_start`、`set_type`。
 - Rust **1.77**。这是官方工具链里最后一个自带 Windows 7 支持的版本（2024-03）。三个平台的核心库和命令层都用它编译，避免出现只能在新系统上解析的依赖锁。依赖保持在 serde、serde_json 这一档，并钉住仍能在 1.77 上编译的版本。
 - Qt **5.15** Widgets，C++。使用开源的 5.15 构建；需要后续补丁时用 KDE 的 Qt 5 补丁集合，不升级到 Qt 6。
 - 不使用 Node.js，也不使用 WebView2。Windows 7 上没有可用的现行 WebView2 安装器。
-- Ubuntu 构建机安装 Qt 5 的开发包。运行期带上 Widgets 所需的 Qt 库，不依赖 WebKitGTK。
+- Ubuntu 构建机安装 Qt 5 的开发包。交付物是 `.deb`：可执行文件装到 `/usr/bin/et`，运行期依赖发行版里的 Qt 5.15 Widgets 运行库，不依赖 WebKitGTK。
 - macOS 交付同时包含 x86_64 和 arm64 的通用 `.app`，并打成 `.dmg`。x86_64 使用官方 Qt 5.15.2；arm64 使用带苹果芯片支持的 Qt 5.15.2，不换 Qt 6。arm64 切片的最低系统版本是 11.0，x86_64 仍是 10.13。
 - Windows 安装包的子系统版本设为 Windows 7，并在 Windows 7 SP1 x64 上做启动验收。不支持 32 位。
 - 不在运行时下载分区类型数据库或协议描述。预设类型表编译进核心库。

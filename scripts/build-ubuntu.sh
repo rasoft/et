@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# 编译 Ubuntu 上的 et。用法：./scripts/build-ubuntu.sh [Debug|Release]
+# 编译 Ubuntu 上的 et，并打成 .deb。用法：./scripts/build-ubuntu.sh [Debug|Release]
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ubuntu-deb.sh"
 et_prepend_path
 
 root="$(et_root)"
@@ -18,8 +19,8 @@ case "${build_type}" in
     ;;
 esac
 
-if ! et_have cmake || ! et_have ninja || ! et_have cargo; then
-  echo "缺少 cmake、ninja 或 cargo。请先运行 ./scripts/bootstrap-ubuntu.sh。" >&2
+if ! et_have cmake || ! et_have ninja || ! et_have cargo || ! et_have dpkg-deb || ! et_have dpkg-shlibdeps; then
+  echo "缺少 cmake、ninja、cargo、dpkg-deb 或 dpkg-shlibdeps。请先运行 ./scripts/bootstrap-ubuntu.sh。" >&2
   exit 1
 fi
 
@@ -35,4 +36,7 @@ cmake "${cmake_args[@]}"
 cmake --build build/ubuntu
 ln -sfn build/ubuntu/compile_commands.json compile_commands.json
 
-echo "已生成：${root}/build/ubuntu/et"
+deb="$(et_make_deb "${root}/build/ubuntu/et" "${root}/build/ubuntu")"
+echo "已生成："
+echo "  ${root}/build/ubuntu/et"
+echo "  ${deb}"

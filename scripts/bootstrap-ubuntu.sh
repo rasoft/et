@@ -23,6 +23,7 @@ packages=(
   ca-certificates
   cmake
   curl
+  dpkg-dev
   ninja-build
   pkg-config
   qtbase5-dev

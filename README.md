@@ -23,7 +23,7 @@
 | macOS | `./scripts/bootstrap-macos.sh` | `./scripts/build-macos.sh` |
 | Windows x64 | `powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1` | `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1` |
 
-macOS 产物是同时包含 x86_64 和 arm64 的 `build/macos/et.app` 和 `build/macos/et.dmg`。Windows 构建机使用 Visual Studio 2019（MSVC v142）；可执行文件的子系统版本是 Windows 7。可选参数 `Debug` 或 `Release`，默认 `Release`。官方下载站超时时，可以设置 `ET_QT_MIRROR` 指向带 `online` 目录的 Qt 镜像后再跑环境脚本。
+macOS 产物是同时包含 x86_64 和 arm64 的 `build/macos/et.app` 和 `build/macos/et.dmg`。Ubuntu 产物是 `build/ubuntu/et_<version>_<arch>.deb`，安装后使用发行版里的 Qt 5.15 Widgets 运行库。Windows 构建机使用 Visual Studio 2019（MSVC v142）；可执行文件的子系统版本是 Windows 7。可选参数 `Debug` 或 `Release`，默认 `Release`。官方下载站超时时，可以设置 `ET_QT_MIRROR` 指向带 `online` 目录的 Qt 镜像后再跑环境脚本。
 
 ## 已定结论
 

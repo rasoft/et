@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=et
+GenericName=eMMC Toolkit
+Comment=编辑 eMMC 镜像包
+Exec=et
+Terminal=false
+Categories=Utility;
+StartupNotify=true
