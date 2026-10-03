@@ -1,9 +1,12 @@
+#include "MainWindow.h"
 #include "et_abi.h"
 
 #include <QApplication>
-#include <QMainWindow>
 
 int main(int argc, char *argv[]) {
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("et"));
 
@@ -11,9 +14,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    QMainWindow window;
-    window.setWindowTitle(QStringLiteral("et"));
-    window.resize(1024, 700);
+    MainWindow window;
     window.show();
     return app.exec();
 }

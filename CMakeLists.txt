@@ -40,7 +40,14 @@ find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets)
 
 include(cmake/EtRust.cmake)
 
-add_executable(et src-qt/main.cpp)
+add_executable(et
+  src-qt/main.cpp
+  src-qt/MainWindow.h
+  src-qt/MainWindow.cpp
+  src-qt/PartitionListWidget.h
+  src-qt/PartitionListWidget.cpp
+  src-qt/PartitionEditorWidget.h
+  src-qt/PartitionEditorWidget.cpp)
 add_dependencies(et et_cmd_cargo)
 target_include_directories(et PRIVATE "${CMAKE_SOURCE_DIR}/crates/et-cmd/include")
 target_link_libraries(et PRIVATE et_cmd ${ET_RUST_NATIVE_LIBS} Qt5::Widgets)
