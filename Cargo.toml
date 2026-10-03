@@ -8,6 +8,10 @@ edition = "2021"
 publish = false
 rust-version = "1.77"
 
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # 跨 C ABI 时不展开 Rust 栈。命令层失败用返回值表示，不用 panic 传出。
 [profile.dev]
 panic = "abort"

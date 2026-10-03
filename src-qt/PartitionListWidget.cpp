@@ -48,3 +48,11 @@ PartitionListWidget::PartitionListWidget(QWidget *parent)
 bool PartitionListWidget::hasSelection() const {
     return selectionModel() != nullptr && selectionModel()->hasSelection();
 }
+
+void PartitionListWidget::clearPartitions() {
+    auto *items = qobject_cast<QStandardItemModel *>(model());
+    if (items == nullptr) {
+        return;
+    }
+    items->removeRows(0, items->rowCount());
+}

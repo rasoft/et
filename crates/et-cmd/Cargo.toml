@@ -12,3 +12,5 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 et-core = { path = "../et-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

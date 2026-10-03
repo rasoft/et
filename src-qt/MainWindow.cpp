@@ -1,14 +1,55 @@
 #include "MainWindow.h"
 
+#include "EtSession.h"
+#include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
 
 #include <QAction>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QVBoxLayout>
+
+namespace {
+
+QString formatBytes(quint64 bytes) {
+    const quint64 kib = 1024;
+    const quint64 mib = kib * 1024;
+    const quint64 gib = mib * 1024;
+    const quint64 tib = gib * 1024;
+    if (bytes >= tib && bytes % tib == 0) {
+        return QStringLiteral("%1 TiB").arg(bytes / tib);
+    }
+    if (bytes >= gib && bytes % gib == 0) {
+        return QStringLiteral("%1 GiB").arg(bytes / gib);
+    }
+    if (bytes >= mib && bytes % mib == 0) {
+        return QStringLiteral("%1 MiB").arg(bytes / mib);
+    }
+    if (bytes >= kib && bytes % kib == 0) {
+        return QStringLiteral("%1 KiB").arg(bytes / kib);
+    }
+    return QStringLiteral("%1 字节").arg(bytes);
+}
+
+void showWarning(QWidget *parent, const QString &text) {
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("新建镜像包"));
+    box.setText(text);
+    box.addButton(QStringLiteral("确定"), QMessageBox::AcceptRole);
+    box.exec();
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent) {
@@ -104,7 +145,58 @@ void MainWindow::createCentralWidget() {
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
     splitter->setSizes({760, 420});
-    setCentralWidget(splitter);
+
+    auto *bar = new QWidget(this);
+    auto *barLayout = new QVBoxLayout(bar);
+    barLayout->setContentsMargins(0, 0, 0, 0);
+    barLayout->setSpacing(0);
+
+    auto *rowHost = new QWidget(bar);
+    auto *row = new QHBoxLayout(rowHost);
+    row->setContentsMargins(12, 8, 12, 8);
+    m_closedSummary = new QLabel(QStringLiteral("未打开镜像包"), rowHost);
+    QPalette closedPalette = m_closedSummary->palette();
+    closedPalette.setColor(QPalette::WindowText,
+                            closedPalette.color(QPalette::Disabled, QPalette::WindowText));
+    m_closedSummary->setPalette(closedPalette);
+    row->addWidget(m_closedSummary);
+
+    m_openSummary = new QWidget(rowHost);
+    auto *openLayout = new QHBoxLayout(m_openSummary);
+    openLayout->setContentsMargins(0, 0, 0, 0);
+    openLayout->setSpacing(6);
+    const auto addField = [this, openLayout](const QString &caption, QLabel **value) {
+        auto *label = new QLabel(caption, m_openSummary);
+        QPalette palette = label->palette();
+        palette.setColor(QPalette::WindowText, palette.color(QPalette::Disabled, QPalette::WindowText));
+        label->setPalette(palette);
+        *value = new QLabel(m_openSummary);
+        openLayout->addWidget(label);
+        openLayout->addWidget(*value);
+        openLayout->addSpacing(16);
+    };
+    addField(QStringLiteral("名称"), &m_nameValue);
+    addField(QStringLiteral("容量"), &m_capacityValue);
+    addField(QStringLiteral("扇区"), &m_sectorValue);
+    addField(QStringLiteral("对齐"), &m_alignmentValue);
+    addField(QStringLiteral("状态"), &m_stateValue);
+    openLayout->addStretch(1);
+    m_openSummary->setVisible(false);
+    row->addWidget(m_openSummary, 1);
+
+    auto *line = new QFrame(bar);
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    barLayout->addWidget(rowHost);
+    barLayout->addWidget(line);
+
+    auto *central = new QWidget(this);
+    auto *layout = new QVBoxLayout(central);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(bar);
+    layout->addWidget(splitter, 1);
+    setCentralWidget(central);
 
     connect(m_partitionList, &PartitionListWidget::selectionChanged, this,
             &MainWindow::onPartitionSelectionChanged);
@@ -116,10 +208,10 @@ void MainWindow::createStatusBar() {
 
 void MainWindow::updateActionStates() {
     const bool hasSelection = m_partitionList != nullptr && m_partitionList->hasSelection();
-    m_savePackage->setEnabled(m_packageOpen);
-    m_newPartition->setEnabled(m_packageOpen);
-    m_deletePartition->setEnabled(m_packageOpen && hasSelection);
-    m_download->setEnabled(m_packageOpen);
+    m_savePackage->setEnabled(m_hasDocument);
+    m_newPartition->setEnabled(m_hasDocument);
+    m_deletePartition->setEnabled(m_hasDocument && hasSelection);
+    m_download->setEnabled(m_hasDocument);
 }
 
 void MainWindow::showPending(const QString &command) {
@@ -127,7 +219,63 @@ void MainWindow::showPending(const QString &command) {
 }
 
 void MainWindow::newPackage() {
-    showPending(QStringLiteral("新建"));
+    bool discardUnsaved = false;
+    if (m_hasDocument && m_dirty) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Question);
+        box.setWindowTitle(QStringLiteral("新建镜像包"));
+        box.setText(QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并新建吗？"));
+        auto *discard = box.addButton(QStringLiteral("放弃修改"), QMessageBox::AcceptRole);
+        auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
+        box.exec();
+        if (box.clickedButton() != discard) {
+            return;
+        }
+        discardUnsaved = true;
+    }
+
+    NewPackageDialog dialog(this);
+    while (dialog.exec() == QDialog::Accepted) {
+        QString viewJson;
+        QString error;
+        if (!EtSession::createPackage(dialog.directory(), dialog.packageName(), dialog.userAreaBytes(),
+                                      dialog.sectorSize(), discardUnsaved, &viewJson, &error)) {
+            showWarning(this, error);
+            continue;
+        }
+        DocumentView view;
+        if (!DocumentView::parse(viewJson, &view, &error)) {
+            showWarning(this, QStringLiteral("已创建 %1，但界面没能读回结果：%2")
+                                  .arg(dialog.directory(), error));
+            return;
+        }
+        applyDocument(view);
+        return;
+    }
+}
+
+void MainWindow::applyDocument(const DocumentView &view) {
+    m_hasDocument = true;
+    m_dirty = view.dirty;
+    m_closedSummary->setVisible(false);
+    m_openSummary->setVisible(true);
+    m_nameValue->setText(view.name);
+    m_nameValue->setToolTip(view.description.isEmpty() ? view.name : view.description);
+    m_capacityValue->setText(formatBytes(view.userAreaBytes));
+    m_sectorValue->setText(QStringLiteral("%1 字节").arg(view.sectorSize));
+    m_alignmentValue->setText(formatBytes(view.alignment));
+    QString state = view.dirty ? QStringLiteral("未保存") : QStringLiteral("已保存");
+    if (view.issueCount > 0) {
+        state += QStringLiteral("，含错误");
+    }
+    m_stateValue->setText(state);
+    setWindowTitle(view.dirty ? QStringLiteral("%1* — et").arg(view.name)
+                              : QStringLiteral("%1 — et").arg(view.name));
+    m_partitionList->clearPartitions();
+    m_partitionEditor->setSelectionAvailable(false);
+    statusBar()->showMessage(view.root);
+    updateActionStates();
 }
 
 void MainWindow::importPackage() {

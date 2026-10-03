@@ -6,6 +6,9 @@
 class PartitionEditorWidget;
 class PartitionListWidget;
 class QAction;
+class QLabel;
+class QWidget;
+struct DocumentView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -30,6 +33,7 @@ private:
     void createStatusBar();
     void updateActionStates();
     void showPending(const QString &command);
+    void applyDocument(const DocumentView &view);
 
     QAction *m_newPackage = nullptr;
     QAction *m_importPackage = nullptr;
@@ -41,5 +45,13 @@ private:
 
     PartitionListWidget *m_partitionList = nullptr;
     PartitionEditorWidget *m_partitionEditor = nullptr;
-    bool m_packageOpen = false;
+    QWidget *m_openSummary = nullptr;
+    QLabel *m_closedSummary = nullptr;
+    QLabel *m_nameValue = nullptr;
+    QLabel *m_capacityValue = nullptr;
+    QLabel *m_sectorValue = nullptr;
+    QLabel *m_alignmentValue = nullptr;
+    QLabel *m_stateValue = nullptr;
+    bool m_hasDocument = false;
+    bool m_dirty = false;
 };

@@ -4,3 +4,4 @@
 //! Qt 只通过 C ABI 交换数据，不直接改文档。
 
 mod ffi;
+pub mod session;

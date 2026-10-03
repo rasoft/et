@@ -44,6 +44,10 @@ add_executable(et
   src-qt/main.cpp
   src-qt/MainWindow.h
   src-qt/MainWindow.cpp
+  src-qt/NewPackageDialog.h
+  src-qt/NewPackageDialog.cpp
+  src-qt/EtSession.h
+  src-qt/EtSession.cpp
   src-qt/PartitionListWidget.h
   src-qt/PartitionListWidget.cpp
   src-qt/PartitionEditorWidget.h

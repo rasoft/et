@@ -18,6 +18,7 @@ public:
     explicit PartitionListWidget(QWidget *parent = nullptr);
 
     bool hasSelection() const;
+    void clearPartitions();
 
 signals:
     void selectionChanged(bool hasSelection);

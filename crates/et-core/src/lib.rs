@@ -5,9 +5,12 @@
 #![forbid(unsafe_code)]
 
 pub mod disk;
+mod error;
 pub mod layout;
 pub mod manifest;
 pub mod validate;
+
+pub use error::Error;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
