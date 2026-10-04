@@ -44,6 +44,8 @@ add_executable(et
   src-qt/main.cpp
   src-qt/MainWindow.h
   src-qt/MainWindow.cpp
+  src-qt/ToolbarIcons.h
+  src-qt/ToolbarIcons.cpp
   src-qt/NewPackageDialog.h
   src-qt/NewPackageDialog.cpp
   src-qt/EtSession.h

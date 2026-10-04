@@ -4,6 +4,7 @@
 #include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
+#include "ToolbarIcons.h"
 
 #include <QAction>
 #include <QFrame>
@@ -94,6 +95,12 @@ void MainWindow::createActions() {
     m_download = new QAction(QStringLiteral("下载"), this);
     m_download->setStatusTip(QStringLiteral("下载到设备"));
 
+    m_newPackage->setIcon(toolbarIcon(ToolbarIcon::NewPackage));
+    m_savePackage->setIcon(toolbarIcon(ToolbarIcon::Save));
+    m_deletePartition->setIcon(toolbarIcon(ToolbarIcon::DeletePartition));
+    m_newPartition->setIcon(toolbarIcon(ToolbarIcon::AddPartition));
+    m_download->setIcon(toolbarIcon(ToolbarIcon::Download));
+
     connect(m_newPackage, &QAction::triggered, this, &MainWindow::newPackage);
     connect(m_importPackage, &QAction::triggered, this, &MainWindow::importPackage);
     connect(m_savePackage, &QAction::triggered, this, &MainWindow::savePackage);
@@ -123,7 +130,8 @@ void MainWindow::createToolBar() {
     toolBar->setObjectName(QStringLiteral("mainToolBar"));
     toolBar->setMovable(false);
     toolBar->setFloatable(false);
-    toolBar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    toolBar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    toolBar->setIconSize(QSize(24, 24));
     toolBar->addAction(m_newPackage);
     toolBar->addAction(m_savePackage);
     toolBar->addSeparator();
