@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 struct PartitionView {
@@ -81,5 +82,7 @@ bool previewImport(const QString &sourceFile, QString *previewJson, QString *err
 
 bool importPackage(const QString &sourceFile, const QString &selectionJson, QString *viewJson,
                    QString *error);
+
+bool removePartitions(const QStringList &ids, QString *viewJson, QString *error);
 
 }

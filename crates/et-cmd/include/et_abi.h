@@ -81,6 +81,16 @@ int32_t et_import_package(
     char **out_view,
     char **out_error);
 
+/* 删除当前包里勾选的分区。ids_json 是 JSON 字符串数组，元素是分区 id。
+ * 成功返回 0，*out_view 是 DocumentView，manifest 已写回，对应镜像已从 images/ 删除。
+ * 失败返回 1，*out_error 是说明，当前文档保持不变。
+ * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
+ */
+int32_t et_remove_partitions(
+    const char *ids_json,
+    char **out_view,
+    char **out_error);
+
 #ifdef __cplusplus
 }
 #endif

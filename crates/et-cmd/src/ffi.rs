@@ -172,6 +172,36 @@ pub extern "C" fn et_import_package(
     }
 }
 
+/// 删除勾选的分区。失败时不改当前会话。
+#[no_mangle]
+pub extern "C" fn et_remove_partitions(
+    ids_json: *const c_char,
+    out_view: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_view.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_view = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let ids = c_str(ids_json, "分区选择")?;
+        let view = with_session(|session| session.remove_partitions(ids))?;
+        view.to_json()
+    })();
+
+    match result {
+        Ok(json) => write_out(out_view, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
 fn with_session<T>(f: impl FnOnce(&mut Session) -> T) -> T {
     let mut session = SESSION
         .lock()

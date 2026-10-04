@@ -26,6 +26,7 @@ private slots:
     void deletePartition();
     void download();
     void onPartitionSelectionChanged(bool hasSelection);
+    void onPartitionChecksChanged();
 
 private:
     void createActions();

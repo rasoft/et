@@ -391,3 +391,29 @@ bool EtSession::importPackage(const QString &sourceFile, const QString &selectio
     *viewJson = viewText;
     return true;
 }
+
+bool EtSession::removePartitions(const QStringList &ids, QString *viewJson, QString *error) {
+    if (viewJson == nullptr || error == nullptr) {
+        return false;
+    }
+    QJsonArray array;
+    for (const QString &id : ids) {
+        array.append(id);
+    }
+    const QByteArray idsBytes = QJsonDocument(array).toJson(QJsonDocument::Compact);
+    char *view = nullptr;
+    char *message = nullptr;
+    const int32_t rc = et_remove_partitions(idsBytes.constData(), &view, &message);
+    const QString viewText = takeString(view);
+    const QString errorText = takeString(message);
+    if (rc != 0) {
+        *error = errorText.isEmpty() ? QStringLiteral("删除分区失败") : errorText;
+        return false;
+    }
+    if (viewText.isEmpty()) {
+        *error = QStringLiteral("删除分区没有返回文档");
+        return false;
+    }
+    *viewJson = viewText;
+    return true;
+}

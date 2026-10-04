@@ -139,6 +139,24 @@ impl Session {
         self.view()
     }
 
+    /// 删除勾选的分区。镜像文件从 `images/` 去掉，manifest 立即写回。
+    /// 没有打开的包、或 id 不存在时失败，失败时不改会话。
+    pub fn remove_partitions(&mut self, ids_json: &str) -> Result<DocumentView, Error> {
+        let ids = parse_partition_ids(ids_json)?;
+        let root = self
+            .root
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let current = self
+            .manifest
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let manifest = et_core::remove_partitions(&root, &current, &ids)?;
+        self.manifest = Some(manifest);
+        self.dirty = false;
+        self.view()
+    }
+
     fn view(&self) -> Result<DocumentView, Error> {
         let root = self
             .root
@@ -156,6 +174,25 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_partition_ids(json: &str) -> Result<Vec<String>, Error> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| Error::new("分区选择无法解析"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| Error::new("分区选择无法解析"))?;
+    let mut ids = Vec::with_capacity(array.len());
+    for item in array {
+        let id = item
+            .as_str()
+            .ok_or_else(|| Error::new("分区选择无法解析"))?;
+        if id.is_empty() {
+            return Err(Error::new("分区 id 为空"));
+        }
+        ids.push(id.to_string());
+    }
+    Ok(ids)
 }
 
 fn document_view(
@@ -452,5 +489,48 @@ boot boot.img true RAW ro 1 7 0x800 0x400
             session.manifest.as_ref().unwrap().partitions[0].name,
             "boot"
         );
+    }
+
+    #[test]
+    fn remove_partitions_drops_checked_rows_and_reflows_the_next_one() {
+        let tmp = TempDir::new();
+        let mut session = Session::new();
+        session
+            .create_package(&tmp.path().join("pkg.etpk"), "board", GIB16, 512, false)
+            .unwrap();
+        let boot = "11111111-1111-4111-8111-111111111111";
+        let system = "22222222-2222-4222-8222-222222222222";
+        let manifest = session.manifest.as_mut().unwrap();
+        manifest.partitions.push(et_core::manifest::Partition {
+            id: boot.to_string(),
+            name: "boot".to_string(),
+            size_bytes: Some(1024 * 1024),
+            start_bytes: None,
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: None,
+            extra: serde_json::Map::new(),
+        });
+        manifest.partitions.push(et_core::manifest::Partition {
+            id: system.to_string(),
+            name: "system".to_string(),
+            size_bytes: Some(1024 * 1024),
+            start_bytes: None,
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: None,
+            extra: serde_json::Map::new(),
+        });
+        let view = session
+            .remove_partitions(&format!(r#"["{boot}"]"#))
+            .unwrap();
+        assert_eq!(view.partitions.len(), 1);
+        assert_eq!(view.partitions[0].name, "system");
+        assert_eq!(view.partitions[0].start_bytes, 1024 * 1024);
+        assert!(!view.dirty);
+
+        let err = session.remove_partitions("[]").unwrap_err();
+        assert_eq!(err.message(), "没有选中的分区");
+        assert_eq!(session.manifest.as_ref().unwrap().partitions.len(), 1);
     }
 }

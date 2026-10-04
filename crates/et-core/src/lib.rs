@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod disk;
+mod edit;
 mod error;
 mod flash_conf;
 pub mod import;
@@ -13,6 +14,7 @@ pub mod manifest;
 mod merge_bin;
 pub mod validate;
 
+pub use edit::remove_partitions;
 pub use error::Error;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

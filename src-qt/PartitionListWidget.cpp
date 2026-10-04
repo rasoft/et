@@ -238,6 +238,31 @@ bool PartitionListWidget::hasSelection() const {
     return selectionModel() != nullptr && selectionModel()->hasSelection();
 }
 
+bool PartitionListWidget::hasChecked() const {
+    return !checkedPartitionIds().isEmpty();
+}
+
+QStringList PartitionListWidget::checkedPartitionIds() const {
+    QStringList ids;
+    const auto *items = qobject_cast<const QStandardItemModel *>(model());
+    if (items == nullptr) {
+        return ids;
+    }
+    ids.reserve(items->rowCount());
+    for (int row = 0; row < items->rowCount(); ++row) {
+        const QStandardItem *check = items->item(row, Selected);
+        const QStandardItem *name = items->item(row, Name);
+        if (check == nullptr || name == nullptr || check->checkState() != Qt::Checked) {
+            continue;
+        }
+        const QString id = name->data(Qt::UserRole).toString();
+        if (!id.isEmpty()) {
+            ids.append(id);
+        }
+    }
+    return ids;
+}
+
 void PartitionListWidget::clearPartitions() {
     setPartitions({});
 }
@@ -291,6 +316,7 @@ void PartitionListWidget::updateHeaderCheck() {
     if (header->checkBox()->checkState() != state) {
         header->checkBox()->setCheckState(state);
     }
+    emit checksChanged(checked > 0);
 }
 
 void PartitionListWidget::setAllRowChecks(Qt::CheckState state) {

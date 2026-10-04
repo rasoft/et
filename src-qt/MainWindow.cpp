@@ -250,6 +250,8 @@ void MainWindow::createCentralWidget() {
 
     connect(m_partitionList, &PartitionListWidget::selectionChanged, this,
             &MainWindow::onPartitionSelectionChanged);
+    connect(m_partitionList, &PartitionListWidget::checksChanged, this,
+            &MainWindow::onPartitionChecksChanged);
 }
 
 void MainWindow::createStatusBar() {
@@ -257,11 +259,11 @@ void MainWindow::createStatusBar() {
 }
 
 void MainWindow::updateActionStates() {
-    const bool hasSelection = m_partitionList != nullptr && m_partitionList->hasSelection();
+    const bool hasChecked = m_partitionList != nullptr && m_partitionList->hasChecked();
     m_savePackage->setEnabled(m_hasDocument);
     m_importPackage->setEnabled(m_hasDocument);
     m_newPartition->setEnabled(m_hasDocument);
-    m_deletePartition->setEnabled(m_hasDocument && hasSelection);
+    m_deletePartition->setEnabled(m_hasDocument && hasChecked);
     m_download->setEnabled(m_hasDocument);
 }
 
@@ -478,7 +480,26 @@ void MainWindow::newPartition() {
 }
 
 void MainWindow::deletePartition() {
-    showPending(QStringLiteral("删除分区"));
+    if (m_partitionList == nullptr) {
+        return;
+    }
+    const QStringList ids = m_partitionList->checkedPartitionIds();
+    if (ids.isEmpty()) {
+        return;
+    }
+    QString viewJson;
+    QString error;
+    if (!EtSession::removePartitions(ids, &viewJson, &error)) {
+        showWarning(QStringLiteral("删除分区"), error);
+        return;
+    }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("删除分区"),
+                    QStringLiteral("分区已删除，但界面没能读回结果：%1").arg(error));
+        return;
+    }
+    applyDocument(view);
 }
 
 void MainWindow::download() {
@@ -487,5 +508,8 @@ void MainWindow::download() {
 
 void MainWindow::onPartitionSelectionChanged(bool hasSelection) {
     m_partitionEditor->setSelectionAvailable(hasSelection);
+}
+
+void MainWindow::onPartitionChecksChanged() {
     updateActionStates();
 }
