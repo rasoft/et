@@ -28,7 +28,7 @@ pub struct ViewMetadata {
     pub name: String,
     pub description: String,
     pub sector_size: u32,
-    pub user_area_bytes: u64,
+    pub user_area_bytes: Option<u64>,
     pub alignment: u64,
 }
 
@@ -41,7 +41,7 @@ pub struct ViewPartition {
     pub partition_type: String,
     pub start_bytes: u64,
     pub start_fixed: bool,
-    pub size_bytes: u64,
+    pub size_bytes: Option<u64>,
     pub image: Option<String>,
     pub image_bytes: Option<u64>,
 }
@@ -108,6 +108,24 @@ impl Session {
         let view = document_view(&opened.root, &opened.manifest, false)?;
         self.root = Some(opened.root);
         self.manifest = Some(opened.manifest);
+        self.dirty = false;
+        Ok(view)
+    }
+
+    pub fn import_package(
+        &mut self,
+        source: &Path,
+        dir: &Path,
+        name: &str,
+        discard_unsaved: bool,
+    ) -> Result<DocumentView, Error> {
+        if self.dirty && !discard_unsaved {
+            return Err(Error::new("有未保存的修改"));
+        }
+        let created = et_core::import::import_package(source, dir, name)?;
+        let view = document_view(&created.root, &created.manifest, false)?;
+        self.root = Some(created.root);
+        self.manifest = Some(created.manifest);
         self.dirty = false;
         Ok(view)
     }
@@ -246,7 +264,7 @@ mod tests {
         assert!(view.partitions.is_empty());
         assert!(view.issues.is_empty());
         assert_eq!(view.metadata.name, "board-d1");
-        assert_eq!(view.metadata.user_area_bytes, GIB16);
+        assert_eq!(view.metadata.user_area_bytes, Some(GIB16));
         assert_eq!(view.metadata.sector_size, 512);
         assert_eq!(view.metadata.alignment, 1024 * 1024);
         assert!(view.root.ends_with("board-d1.etpk"));
@@ -328,7 +346,7 @@ mod tests {
         manifest.partitions.push(et_core::manifest::Partition {
             id: "6f1c2a0e-7b4d-4e3a-9c1f-2a8b0d5e6f70".to_string(),
             name: "boot".to_string(),
-            size_bytes: 64 * 1024 * 1024,
+            size_bytes: Some(64 * 1024 * 1024),
             start_bytes: None,
             partition_type: "linux-filesystem".to_string(),
             attributes: 0,
@@ -362,5 +380,61 @@ mod tests {
             .iter()
             .any(|issue| issue.message.contains("不存在")));
         assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "second");
+    }
+
+    #[test]
+    fn import_package_replaces_the_document_and_keeps_it_when_import_fails() {
+        let tmp = TempDir::new();
+        let first = tmp.path().join("first.etpk");
+        let mut session = Session::new();
+        session
+            .create_package(&first, "first", GIB16, 512, false)
+            .unwrap();
+        session.dirty = true;
+
+        let conf = tmp.path().join("flash.conf");
+        fs::write(tmp.path().join("boot.img"), b"boot-bytes").unwrap();
+        fs::write(
+            &conf,
+            "\
+block_size 512
+table_type gpt
+flash_size 0x10000
+
+boot boot.img true RAW ro 1 7 0x800 0x400
+",
+        )
+        .unwrap();
+        let imported = tmp.path().join("imported.etpk");
+        let err = session
+            .import_package(&conf, &imported, "imported", false)
+            .unwrap_err();
+        assert_eq!(err.message(), "有未保存的修改");
+        assert!(!imported.exists());
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+
+        let view = session
+            .import_package(&conf, &imported, "imported", true)
+            .unwrap();
+        assert!(!view.dirty);
+        assert_eq!(view.metadata.name, "imported");
+        assert_eq!(view.metadata.sector_size, 512);
+        assert_eq!(view.partitions.len(), 1);
+        assert_eq!(view.partitions[0].name, "boot");
+        assert!(view.partitions[0].start_fixed);
+        assert_eq!(view.partitions[0].start_bytes, 0x800 * 512);
+        assert_eq!(view.partitions[0].size_bytes, Some(0x400 * 512));
+        assert_eq!(view.partitions[0].image_bytes, Some(10));
+        assert!(view.issues.is_empty());
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "imported");
+
+        let missing = tmp.path().join("missing.conf");
+        fs::write(&missing, b"not a conf").unwrap();
+        let err = session
+            .import_package(&missing, &tmp.path().join("nope.etpk"), "nope", false)
+            .unwrap_err();
+        assert!(err.message().contains("9 列") || err.message().contains("无法识别"));
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "imported");
+        assert!(!tmp.path().join("nope.etpk").exists());
     }
 }

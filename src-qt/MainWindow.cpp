@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "EtSession.h"
+#include "ImportPackageDialog.h"
 #include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
@@ -56,8 +57,11 @@ QString utilizationText(const PartitionView &partition) {
     if (!partition.hasImage) {
         return QStringLiteral("—");
     }
-    if (!partition.hasImageBytes || partition.sizeBytes == 0) {
+    if (!partition.hasImageBytes) {
         return QStringLiteral("缺失");
+    }
+    if (!partition.hasSizeBytes || partition.sizeBytes == 0) {
+        return QStringLiteral("—");
     }
     const quint64 percent = partition.imageBytes * 100 / partition.sizeBytes;
     return QStringLiteral("%1%").arg(percent);
@@ -90,7 +94,7 @@ void MainWindow::createActions() {
     m_openPackage->setStatusTip(QStringLiteral("打开镜像包"));
 
     m_importPackage = new QAction(QStringLiteral("导入..."), this);
-    m_importPackage->setStatusTip(QStringLiteral("导入镜像包"));
+    m_importPackage->setStatusTip(QStringLiteral("导入 flash.conf 或 download.bin"));
 
     m_savePackage = new QAction(QStringLiteral("保存"), this);
     m_savePackage->setShortcut(QKeySequence::Save);
@@ -356,7 +360,8 @@ void MainWindow::applyDocument(const DocumentView &view) {
     m_openSummary->setVisible(true);
     m_nameValue->setText(view.name);
     m_nameValue->setToolTip(view.description.isEmpty() ? view.name : view.description);
-    m_capacityValue->setText(formatBytes(view.userAreaBytes));
+    m_capacityValue->setText(view.hasUserAreaBytes ? formatBytes(view.userAreaBytes)
+                                                    : QStringLiteral("下载时确定"));
     m_sectorValue->setText(QStringLiteral("%1 字节").arg(view.sectorSize));
     m_alignmentValue->setText(formatBytes(view.alignment));
     QString state = view.dirty ? QStringLiteral("未保存") : QStringLiteral("已保存");
@@ -374,8 +379,13 @@ void MainWindow::applyDocument(const DocumentView &view) {
         row.id = partition.id;
         row.name = partition.name;
         row.startSector = sectorCountText(partition.startBytes, view.sectorSize);
-        row.sectorCount = sectorCountText(partition.sizeBytes, view.sectorSize);
-        row.capacity = formatBytes(partition.sizeBytes);
+        if (partition.hasSizeBytes) {
+            row.sectorCount = sectorCountText(partition.sizeBytes, view.sectorSize);
+            row.capacity = formatBytes(partition.sizeBytes);
+        } else {
+            row.sectorCount = QStringLiteral("—");
+            row.capacity = QStringLiteral("剩余空间");
+        }
         row.utilization = utilizationText(partition);
         rows.append(row);
     }
@@ -398,7 +408,38 @@ void MainWindow::applyDocument(const DocumentView &view) {
 }
 
 void MainWindow::importPackage() {
-    showPending(QStringLiteral("导入"));
+    bool discardUnsaved = false;
+    if (!confirmReplace(QStringLiteral("导入"),
+                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并导入吗？"),
+                        &discardUnsaved)) {
+        return;
+    }
+
+    const QString start =
+        m_packageRoot.isEmpty() ? QDir::homePath() : QFileInfo(m_packageRoot).absolutePath();
+    const QString source = ImportPackageDialog::pickSourceFile(this, start);
+    if (source.isEmpty()) {
+        return;
+    }
+
+    ImportPackageDialog dialog(source, this);
+    while (dialog.exec() == QDialog::Accepted) {
+        QString viewJson;
+        QString error;
+        if (!EtSession::importPackage(dialog.sourceFile(), dialog.directory(), dialog.packageName(),
+                                      discardUnsaved, &viewJson, &error)) {
+            showWarning(QStringLiteral("导入"), error);
+            continue;
+        }
+        DocumentView view;
+        if (!DocumentView::parse(viewJson, &view, &error)) {
+            showWarning(QStringLiteral("导入"),
+                        QStringLiteral("已导入 %1，但界面没能读回结果：%2").arg(dialog.directory(), error));
+            return;
+        }
+        applyDocument(view);
+        return;
+    }
 }
 
 void MainWindow::savePackage() {

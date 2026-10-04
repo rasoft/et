@@ -126,8 +126,8 @@ bool DocumentView::parse(const QString &json, DocumentView *out, QString *error)
         return false;
     }
     view.sectorSize = static_cast<quint32>(sector);
-    if (!readU64(metadata.value(QStringLiteral("userAreaBytes")), &view.userAreaBytes)) {
-        *error = QStringLiteral("文档视图缺少 userAreaBytes");
+    if (!readOptionalU64(metadata, QStringLiteral("userAreaBytes"), &view.hasUserAreaBytes,
+                         &view.userAreaBytes, error)) {
         return false;
     }
     if (!readU64(metadata.value(QStringLiteral("alignment")), &view.alignment)) {
@@ -161,8 +161,8 @@ bool DocumentView::parse(const QString &json, DocumentView *out, QString *error)
         if (!readBool(object, QStringLiteral("startFixed"), &partition.startFixed, error)) {
             return false;
         }
-        if (!readU64(object.value(QStringLiteral("sizeBytes")), &partition.sizeBytes)) {
-            *error = QStringLiteral("文档视图缺少 sizeBytes");
+        if (!readOptionalU64(object, QStringLiteral("sizeBytes"), &partition.hasSizeBytes,
+                             &partition.sizeBytes, error)) {
             return false;
         }
         if (!readOptionalString(object, QStringLiteral("image"), &partition.hasImage, &partition.image,
@@ -241,6 +241,34 @@ bool EtSession::openPackage(const QString &directory, bool discardUnsaved, QStri
     }
     if (viewText.isEmpty()) {
         *error = QStringLiteral("打开没有返回文档");
+        return false;
+    }
+    *viewJson = viewText;
+    return true;
+}
+
+bool EtSession::importPackage(const QString &sourceFile, const QString &directory,
+                              const QString &name, bool discardUnsaved, QString *viewJson,
+                              QString *error) {
+    if (viewJson == nullptr || error == nullptr) {
+        return false;
+    }
+    const QByteArray sourceBytes = sourceFile.toUtf8();
+    const QByteArray directoryBytes = directory.toUtf8();
+    const QByteArray nameBytes = name.toUtf8();
+    char *view = nullptr;
+    char *message = nullptr;
+    const int32_t rc =
+        et_import_package(sourceBytes.constData(), directoryBytes.constData(), nameBytes.constData(),
+                          discardUnsaved ? 1 : 0, &view, &message);
+    const QString viewText = takeString(view);
+    const QString errorText = takeString(message);
+    if (rc != 0) {
+        *error = errorText.isEmpty() ? QStringLiteral("导入失败") : errorText;
+        return false;
+    }
+    if (viewText.isEmpty()) {
+        *error = QStringLiteral("导入没有返回文档");
         return false;
     }
     *viewJson = viewText;

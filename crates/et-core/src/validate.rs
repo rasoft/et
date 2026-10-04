@@ -142,17 +142,26 @@ fn check_layout(manifest: &Manifest, placed: &[PlacedPartition], issues: &mut Ve
     let alignment = manifest.metadata.alignment;
     let primary = primary_reserved_bytes(sector_size).unwrap_or(u64::MAX);
     let backup = backup_reserved_bytes(sector_size).unwrap_or(0);
-    let usable_end = manifest.metadata.user_area_bytes.saturating_sub(backup);
+    let usable_end = manifest
+        .metadata
+        .user_area_bytes
+        .map(|bytes| bytes.saturating_sub(backup));
+    let last = manifest.partitions.len().saturating_sub(1);
 
     for (index, (partition, place)) in manifest.partitions.iter().zip(placed).enumerate() {
         let name = display_name(partition);
-        if partition.size_bytes == 0 {
-            issues.push(issue(index, format!("分区 {name} 的大小必须大于 0")));
-        } else if partition.size_bytes % sector_size != 0 {
-            issues.push(issue(
+        match partition.size_bytes {
+            None if index != last => issues.push(issue(
+                index,
+                format!("分区 {name} 的大小留空时必须是最后一个分区"),
+            )),
+            None => {}
+            Some(0) => issues.push(issue(index, format!("分区 {name} 的大小必须大于 0"))),
+            Some(size) if sector_size != 0 && size % sector_size != 0 => issues.push(issue(
                 index,
                 format!("分区 {name} 的大小必须是扇区大小的整数倍"),
-            ));
+            )),
+            Some(_) => {}
         }
         let Some(start) = place.start_bytes else {
             issues.push(issue(index, format!("分区 {name} 无法计算起点")));
@@ -166,10 +175,7 @@ fn check_layout(manifest: &Manifest, placed: &[PlacedPartition], issues: &mut Ve
                 ));
             }
         } else if alignment != 0 && start % alignment != 0 {
-            issues.push(issue(
-                index,
-                format!("分区 {name} 自动排布的起点未按对齐"),
-            ));
+            issues.push(issue(index, format!("分区 {name} 自动排布的起点未按对齐")));
         }
         if start < primary {
             issues.push(issue(
@@ -177,28 +183,32 @@ fn check_layout(manifest: &Manifest, placed: &[PlacedPartition], issues: &mut Ve
                 format!("分区 {name} 的起点落在主 GPT 保留区内"),
             ));
         }
-        match place.end_bytes {
-            Some(end) if end > usable_end => {
+        match (partition.size_bytes, place.end_bytes, usable_end) {
+            (None, _, _) => {}
+            (_, None, _) => {
+                issues.push(issue(index, format!("分区 {name} 的大小导致偏移溢出")));
+            }
+            (_, Some(end), Some(limit)) if end > limit => {
                 issues.push(issue(index, format!("分区 {name} 超出可用空间")));
             }
-            None => issues.push(issue(index, format!("分区 {name} 的大小导致偏移溢出"))),
-            Some(_) => {}
+            _ => {}
         }
     }
 
     for left in 0..placed.len() {
         for right in (left + 1)..placed.len() {
-            let (Some(left_start), Some(left_end)) =
-                (placed[left].start_bytes, placed[left].end_bytes)
+            let (Some(left_start), Some(right_start)) =
+                (placed[left].start_bytes, placed[right].start_bytes)
             else {
                 continue;
             };
-            let (Some(right_start), Some(right_end)) =
-                (placed[right].start_bytes, placed[right].end_bytes)
-            else {
+            let (Some(left_end), Some(right_end)) = (
+                span_end(left_start, manifest.partitions[left].size_bytes),
+                span_end(right_start, manifest.partitions[right].size_bytes),
+            ) else {
                 continue;
             };
-            if left_start < right_end && right_start < left_end {
+            if starts_before(left_start, right_end) && starts_before(right_start, left_end) {
                 issues.push(Issue {
                     partition_index: Some(left),
                     message: format!(
@@ -209,6 +219,25 @@ fn check_layout(manifest: &Manifest, placed: &[PlacedPartition], issues: &mut Ve
                 });
             }
         }
+    }
+}
+
+enum SpanEnd {
+    Finite(u64),
+    Unbounded,
+}
+
+fn span_end(start: u64, size: Option<u64>) -> Option<SpanEnd> {
+    match size {
+        None => Some(SpanEnd::Unbounded),
+        Some(size) => start.checked_add(size).map(SpanEnd::Finite),
+    }
+}
+
+fn starts_before(start: u64, end: SpanEnd) -> bool {
+    match end {
+        SpanEnd::Finite(end) => start < end,
+        SpanEnd::Unbounded => true,
     }
 }
 
@@ -267,7 +296,7 @@ fn check_images(
                 lengths.push(None);
             }
             Ok(InsidePath::File { len, .. }) => {
-                if len > partition.size_bytes {
+                if partition.size_bytes.is_some_and(|size| len > size) {
                     issues.push(issue(
                         index,
                         format!("分区 {} 的镜像大于分区", display_name(partition)),
@@ -306,7 +335,7 @@ fn display_name(partition: &Partition) -> String {
     }
 }
 
-fn partition_name_issue(name: &str) -> Option<&'static str> {
+pub(crate) fn partition_name_issue(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("名称不能为空");
     }
@@ -331,7 +360,7 @@ fn partition_type_ok(partition_type: &str) -> bool {
         .is_some_and(is_lowercase_uuid)
 }
 
-fn is_lowercase_uuid(text: &str) -> bool {
+pub(crate) fn is_lowercase_uuid(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() != 36 {
         return false;
@@ -434,7 +463,7 @@ mod tests {
         Partition {
             id: ID.to_string(),
             name: name.to_string(),
-            size_bytes: size,
+            size_bytes: Some(size),
             start_bytes: None,
             partition_type: "linux-filesystem".to_string(),
             attributes: 0,

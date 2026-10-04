@@ -9,6 +9,7 @@ struct PartitionView {
     QString type;
     quint64 startBytes = 0;
     bool startFixed = false;
+    bool hasSizeBytes = false;
     quint64 sizeBytes = 0;
     bool hasImage = false;
     QString image;
@@ -27,6 +28,7 @@ struct DocumentView {
     QString root;
     QString name;
     QString description;
+    bool hasUserAreaBytes = false;
     quint64 userAreaBytes = 0;
     quint32 sectorSize = 0;
     quint64 alignment = 0;
@@ -46,5 +48,8 @@ bool createPackage(const QString &directory, const QString &name, quint64 userAr
                    quint32 sectorSize, bool discardUnsaved, QString *viewJson, QString *error);
 
 bool openPackage(const QString &directory, bool discardUnsaved, QString *viewJson, QString *error);
+
+bool importPackage(const QString &sourceFile, const QString &directory, const QString &name,
+                   bool discardUnsaved, QString *viewJson, QString *error);
 
 }

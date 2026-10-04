@@ -48,6 +48,8 @@ add_executable(et
   src-qt/ToolbarIcons.cpp
   src-qt/NewPackageDialog.h
   src-qt/NewPackageDialog.cpp
+  src-qt/ImportPackageDialog.h
+  src-qt/ImportPackageDialog.cpp
   src-qt/EtSession.h
   src-qt/EtSession.cpp
   src-qt/PartitionListWidget.h

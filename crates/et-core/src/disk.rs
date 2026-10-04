@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
@@ -219,6 +219,81 @@ fn directory_is_empty(dir: &Path) -> Result<bool, Error> {
     }
 }
 
+/// 把 manifest 原子写到包目录。调用方已经检查过路径和字段。
+pub(crate) fn save_manifest(root: &Path, manifest: &Manifest) -> Result<(), Error> {
+    let bytes = manifest.to_bytes()?;
+    write_manifest_atomic(root, &bytes)
+}
+
+/// 镜像在源文件中的一段。`offset` 从文件头算起，长度单位是字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageSpan {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// 把若干段按顺序复制到 `images/<id>.img`。先写 `.partial`，完成后改名。
+pub(crate) fn install_image(root: &Path, id: &str, spans: &[ImageSpan]) -> Result<(), Error> {
+    if spans.is_empty() {
+        return Err(Error::new("没有可复制的镜像"));
+    }
+    if !crate::validate::is_lowercase_uuid(id) {
+        return Err(Error::new("分区 id 无效"));
+    }
+    let images = root.join("images");
+    let partial = images.join(format!("{id}.img.partial"));
+    let final_path = images.join(format!("{id}.img"));
+    let write_result = (|| -> Result<(), Error> {
+        let mut output = File::create(&partial)
+            .map_err(|err| Error::new(format!("写入镜像失败（{}）：{err}", partial.display())))?;
+        for span in spans {
+            copy_span(span, &mut output)?;
+        }
+        output
+            .sync_all()
+            .map_err(|err| Error::new(format!("写入镜像失败（{}）：{err}", partial.display())))?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&partial);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&partial, &final_path) {
+        let _ = fs::remove_file(&partial);
+        return Err(Error::new(format!(
+            "写入镜像失败（{}）：{err}",
+            final_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn copy_span(span: &ImageSpan, output: &mut File) -> Result<(), Error> {
+    let mut input = File::open(&span.path)
+        .map_err(|err| Error::new(format!("无法读取镜像（{}）：{err}", span.path.display())))?;
+    input
+        .seek(SeekFrom::Start(span.offset))
+        .map_err(|err| Error::new(format!("无法读取镜像（{}）：{err}", span.path.display())))?;
+    let mut remaining = span.length;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    while remaining > 0 {
+        let chunk = remaining.min(buffer.len() as u64) as usize;
+        input.read_exact(&mut buffer[..chunk]).map_err(|err| {
+            if err.kind() == ErrorKind::UnexpectedEof {
+                Error::new(format!("镜像长度不足（{}）", span.path.display()))
+            } else {
+                Error::new(format!("无法读取镜像（{}）：{err}", span.path.display()))
+            }
+        })?;
+        output
+            .write_all(&buffer[..chunk])
+            .map_err(|err| Error::new(format!("写入镜像失败（{}）：{err}", span.path.display())))?;
+        remaining -= chunk as u64;
+    }
+    Ok(())
+}
+
 /// 先把内容写到 `manifest.json.tmp` 并 fsync，再改名为 `manifest.json`。
 fn write_manifest_atomic(dir: &Path, bytes: &[u8]) -> Result<(), Error> {
     let tmp = dir.join("manifest.json.tmp");
@@ -409,7 +484,7 @@ mod tests {
             manifest.partitions.push(crate::manifest::Partition {
                 id: format!("00000000-0000-4000-8000-{index:012}"),
                 name: format!("p{index}"),
-                size_bytes: 512,
+                size_bytes: Some(512),
                 start_bytes: None,
                 partition_type: "linux-filesystem".to_string(),
                 attributes: 0,
@@ -438,5 +513,40 @@ mod tests {
             super::open_package(&dir).unwrap_err().message(),
             "分区 id 为空"
         );
+    }
+
+    #[test]
+    fn install_image_removes_partial_when_the_source_is_short() {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("board.etpk");
+        let created = create_package(
+            &dir,
+            Metadata::try_new("board", 16 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        let src = tmp.path().join("short.bin");
+        fs::write(&src, b"ab").unwrap();
+        let id = "6f1c2a0e-7b4d-4e3a-9c1f-2a8b0d5e6f70";
+        let err = super::install_image(
+            &created.root,
+            id,
+            &[super::ImageSpan {
+                path: src,
+                offset: 0,
+                length: 10,
+            }],
+        )
+        .unwrap_err();
+        assert!(err.message().contains("长度不足"));
+        assert!(!created
+            .root
+            .join("images")
+            .join(format!("{id}.img"))
+            .exists());
+        assert!(!created
+            .root
+            .join("images")
+            .join(format!("{id}.img.partial"))
+            .exists());
     }
 }

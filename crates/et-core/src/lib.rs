@@ -1,4 +1,4 @@
-//! 包模型、分区布局、校验，以及镜像文件的复制与删除。
+//! 包模型、分区布局、校验、镜像复制，以及 flash.conf / download.bin 导入。
 //!
 //! 磁盘操作收拢在 [`disk`]。其余模块针对内存中的文档做纯计算，便于测试。
 
@@ -6,8 +6,11 @@
 
 pub mod disk;
 mod error;
+mod flash_conf;
+pub mod import;
 pub mod layout;
 pub mod manifest;
+mod merge_bin;
 pub mod validate;
 
 pub use error::Error;

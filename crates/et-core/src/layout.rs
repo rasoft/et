@@ -47,7 +47,10 @@ pub fn place_partitions(
         } else {
             align_up(cursor, alignment)
         };
-        let end = start.and_then(|value| value.checked_add(partition.size_bytes));
+        let end = match (start, partition.size_bytes) {
+            (Some(start), Some(size)) => start.checked_add(size),
+            _ => None,
+        };
         if let Some(end) = end {
             cursor = cursor.max(end);
         } else {
@@ -87,7 +90,7 @@ mod tests {
         Partition {
             id: id.to_string(),
             name: name.to_string(),
-            size_bytes: size,
+            size_bytes: Some(size),
             start_bytes: start,
             partition_type: "linux-filesystem".to_string(),
             attributes: 0,

@@ -111,6 +111,48 @@ pub extern "C" fn et_open_package(
     }
 }
 
+/// 导入 flash.conf 或 download.bin，并作为当前文档。失败时不替换当前会话。
+#[no_mangle]
+pub extern "C" fn et_import_package(
+    source_utf8: *const c_char,
+    dir_utf8: *const c_char,
+    name_utf8: *const c_char,
+    discard_unsaved: i32,
+    out_view: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_view.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_view = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let source = c_str(source_utf8, "文件")?;
+        let dir = c_str(dir_utf8, "目录")?;
+        let name = c_str(name_utf8, "名称")?;
+        let view = with_session(|session| {
+            session.import_package(
+                Path::new(source),
+                Path::new(dir),
+                name,
+                discard_unsaved != 0,
+            )
+        })?;
+        view.to_json()
+    })();
+
+    match result {
+        Ok(json) => write_out(out_view, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
 fn with_session<T>(f: impl FnOnce(&mut Session) -> T) -> T {
     let mut session = SESSION
         .lock()
@@ -139,7 +181,10 @@ fn write_out(slot: *mut *mut c_char, text: String) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{et_abi_version, et_create_package, et_open_package, et_string_free, et_version};
+    use super::{
+        et_abi_version, et_create_package, et_import_package, et_open_package, et_string_free,
+        et_version,
+    };
     use std::ffi::{CStr, CString};
     use std::fs;
     use std::path::PathBuf;
@@ -267,5 +312,79 @@ mod tests {
         assert!(view_text.contains("\"name\":\"board-d1\""));
         assert!(view_text.contains("\"partitions\":[]"));
         et_string_free(view);
+    }
+
+    #[test]
+    fn import_package_ffi_returns_json_or_an_error_string() {
+        let dir = CString::new("unused").unwrap();
+        let name = CString::new("unused").unwrap();
+        let source = CString::new("unused").unwrap();
+        assert_eq!(
+            et_import_package(
+                source.as_ptr(),
+                dir.as_ptr(),
+                name.as_ptr(),
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            1
+        );
+
+        let tmp = TempDir::new();
+        let missing = tmp.0.join("missing.conf");
+        let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
+        let package = tmp.0.join("imported.etpk");
+        let package_c = CString::new(package.to_str().unwrap()).unwrap();
+        let package_name = CString::new("imported").unwrap();
+        let mut view = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
+        let rc = et_import_package(
+            missing_c.as_ptr(),
+            package_c.as_ptr(),
+            package_name.as_ptr(),
+            1,
+            &mut view,
+            &mut error,
+        );
+        assert_eq!(rc, 1);
+        assert!(view.is_null());
+        assert!(!package.exists());
+        let error_text = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(error_text.contains("文件不存在"));
+        et_string_free(error);
+
+        let conf = tmp.0.join("flash.conf");
+        fs::write(tmp.0.join("boot.img"), b"xyz").unwrap();
+        fs::write(
+            &conf,
+            "block_size 512\ntable_type gpt\nflash_size 0x10000\nboot boot.img true RAW ro 0 0 0xC00 0x200\n",
+        )
+        .unwrap();
+        let conf_c = CString::new(conf.to_str().unwrap()).unwrap();
+        view = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let rc = et_import_package(
+            conf_c.as_ptr(),
+            package_c.as_ptr(),
+            package_name.as_ptr(),
+            1,
+            &mut view,
+            &mut error,
+        );
+        assert_eq!(rc, 0, "{}", unsafe {
+            if error.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(error).to_string_lossy().into_owned()
+            }
+        });
+        assert!(error.is_null());
+        let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
+        assert!(view_text.contains("\"name\":\"imported\""));
+        assert!(view_text.contains("\"name\":\"boot\""));
+        assert!(view_text.contains("1572864"));
+        et_string_free(view);
+        assert!(package.join("manifest.json").is_file());
     }
 }

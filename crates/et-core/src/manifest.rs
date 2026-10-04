@@ -32,7 +32,8 @@ pub struct Metadata {
     pub name: String,
     pub description: String,
     pub sector_size: u32,
-    pub user_area_bytes: u64,
+    /// `None` 表示容量留到下载时再定，由开发板的 eMMC 容量决定。
+    pub user_area_bytes: Option<u64>,
     pub alignment: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot1_bytes: Option<u64>,
@@ -51,7 +52,8 @@ pub struct Metadata {
 pub struct Partition {
     pub id: String,
     pub name: String,
-    pub size_bytes: u64,
+    /// `None` 只用于最后一个分区，表示下载时按真实容量占满剩余空间。
+    pub size_bytes: Option<u64>,
     /// `None` 表示自动排布。序列化时写成 JSON `null`，不省略字段。
     #[serde(default)]
     pub start_bytes: Option<u64>,
@@ -107,7 +109,25 @@ impl Metadata {
             name: name.into(),
             description: String::new(),
             sector_size,
-            user_area_bytes,
+            user_area_bytes: Some(user_area_bytes),
+            alignment: DEFAULT_ALIGNMENT,
+            boot1_bytes: None,
+            boot2_bytes: None,
+            boot1_image: None,
+            boot2_image: None,
+            extra: Map::new(),
+        };
+        metadata.validate()?;
+        Ok(metadata)
+    }
+
+    /// 导入时尚不知道 eMMC 容量。最后一个分区的大小留到下载时再算。
+    pub fn without_capacity(name: impl Into<String>, sector_size: u32) -> Result<Self, Error> {
+        let metadata = Self {
+            name: name.into(),
+            description: String::new(),
+            sector_size,
+            user_area_bytes: None,
             alignment: DEFAULT_ALIGNMENT,
             boot1_bytes: None,
             boot2_bytes: None,
@@ -138,18 +158,20 @@ impl Metadata {
         if self.sector_size != 512 && self.sector_size != 4096 {
             return Err(Error::new("扇区大小只能是 512 或 4096"));
         }
-        if self.user_area_bytes == 0 {
-            return Err(Error::new("容量必须大于 0"));
-        }
         let sector = u64::from(self.sector_size);
-        if self.user_area_bytes % sector != 0 {
-            return Err(Error::new("容量必须是扇区大小的整数倍"));
-        }
-        let reserved = gpt_reserved_bytes(sector).ok_or_else(|| Error::new("容量计算溢出"))?;
-        if self.user_area_bytes <= reserved {
-            return Err(Error::new(format!(
-                "容量必须大于主 GPT 与备份 GPT 占用的 {reserved} 字节"
-            )));
+        if let Some(user_area_bytes) = self.user_area_bytes {
+            if user_area_bytes == 0 {
+                return Err(Error::new("容量必须大于 0"));
+            }
+            if user_area_bytes % sector != 0 {
+                return Err(Error::new("容量必须是扇区大小的整数倍"));
+            }
+            let reserved = gpt_reserved_bytes(sector).ok_or_else(|| Error::new("容量计算溢出"))?;
+            if user_area_bytes <= reserved {
+                return Err(Error::new(format!(
+                    "容量必须大于主 GPT 与备份 GPT 占用的 {reserved} 字节"
+                )));
+            }
         }
         if self.alignment == 0 || self.alignment % sector != 0 || self.alignment % 512 != 0 {
             return Err(Error::new("对齐必须大于 0，且是扇区大小和 512 的整数倍"));

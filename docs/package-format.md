@@ -62,7 +62,7 @@ UTF-8，无 BOM。字段名使用 camelCase。未知字段在同一主版本内�
 | `name` | string | 非空，最长 128 个 Unicode 标量值。是包的显示名，不是目录名 |
 | `description` | string | 可为空，最长 4096 个标量值 |
 | `sectorSize` | number | `512` 或 `4096` |
-| `userAreaBytes` | number | 大于 0，且是 `sectorSize` 的整数倍。必须大于主备 GPT 保留区之和 |
+| `userAreaBytes` | number 或 null | `null` 表示容量留到下载时再定，由开发板的 eMMC 容量决定。数字必须大于 0，是 `sectorSize` 的整数倍，且大于主备 GPT 保留区之和。新建包时写入数字 |
 | `alignment` | number | 大于 0，且同时是 `sectorSize` 和 512 的整数倍。默认 `1048576`（1 MiB） |
 
 第一期新建包时写入上述全部字段。以下字段第一期可以不出现；出现时必须合法，打开后原样保留，界面不编辑：
@@ -94,7 +94,7 @@ UTF-8，无 BOM。字段名使用 camelCase。未知字段在同一主版本内�
 | --- | --- | --- |
 | `id` | string | UUID，RFC 4122 的文本形式，小写。包内唯一 |
 | `name` | string | 包内唯一。非空。只含 `A-Z a-z 0-9 - _ .`。按 UTF-16 码元计最长 36（在本字符集下等价于 36 个字符） |
-| `sizeBytes` | number | 大于 0，且是 `sectorSize` 的整数倍 |
+| `sizeBytes` | number 或 null | `null` 只允许出现在最后一个分区，表示下载时按真实 eMMC 容量占满剩余可用空间。数字必须大于 0，且是 `sectorSize` 的整数倍 |
 | `startBytes` | number 或 null | `null` 表示自动排布。数字表示固定起点，从用户区字节 0 算起，必须是 `sectorSize` 的整数倍 |
 | `type` | string | 预设名或 `guid:<36字符 GUID>`。第一期写入 `linux-filesystem` |
 | `attributes` | number | 0 到 2^64-1 的整数。第一期写入 `0`。对应 GPT 属性位 |
@@ -124,13 +124,15 @@ UTF-8，无 BOM。字段名使用 camelCase。未知字段在同一主版本内�
 - `backupReserved = 33 * sectorSize`
 - 可用半开区间 `[primaryReserved, userAreaBytes - backupReserved)`
 
-若 `userAreaBytes - backupReserved <= primaryReserved`，整份文档无效，拒绝打开。
+`userAreaBytes` 为 `null` 时，不按容量拒绝打开，也不检查分区是否超出磁盘。`sizeBytes` 为 `null` 的分区没有终点，它占满该起点之后的剩余空间，大小到下载时再按开发板容量计算。
+
+若 `userAreaBytes` 是数字，且 `userAreaBytes - backupReserved <= primaryReserved`，整份文档无效，拒绝打开。
 
 对每条分区按顺序维护 `cursor`，初始为 `primaryReserved`：
 
 1. 若 `startBytes` 为 `null`：`start = align_up(cursor, alignment)`。
 2. 若 `startBytes` 为数字：`start = startBytes`，并且不修改后续计算对该分区的“占用”以外的特殊规则；`cursor` 仍要前进，见第 4 步。
-3. `end = start + sizeBytes`。
+3. 若 `sizeBytes` 为 `null`：没有终点。否则 `end = start + sizeBytes`。
 4. `cursor = max(cursor, end)`。下一条自动分区从新的 cursor 对齐。固定分区若留在后面自动分区的前面，不把 cursor 拉回。
 
 `align_up(value, alignment)`：`value` 已对齐时返回 `value`，否则返回向上补齐的结果。用无符号整数，注意加法溢出时视为该分区超出容量。
@@ -138,7 +140,7 @@ UTF-8，无 BOM。字段名使用 camelCase。未知字段在同一主版本内�
 校验在算出全部 `start`/`end` 之后进行：
 
 - `start >= primaryReserved`
-- `end <= userAreaBytes - backupReserved`
+- `userAreaBytes` 是数字时，`end <= userAreaBytes - backupReserved`
 - 任意两条 `[start, end)` 不相交
 - 自动分区的 `start` 是 `alignment` 的整数倍
 - 镜像文件长度 `<= sizeBytes`（文件不存在则另报缺失，不做大小比较）
