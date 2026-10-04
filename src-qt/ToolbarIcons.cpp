@@ -113,7 +113,10 @@ public:
         }
         const QPalette::ColorGroup group =
             mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active;
-        const QColor color = QApplication::palette().color(group, QPalette::ButtonText);
+        // 应用调色板的 ButtonText 在 macOS 深色模式下仍是黑色，工具栏文字用的是
+        // QToolButton 调色板的 ButtonText。图标跟这个颜色走，才能和文字一致。
+        const QColor color =
+            QApplication::palette("QToolButton").color(group, QPalette::ButtonText);
 
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
