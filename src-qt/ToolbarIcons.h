@@ -5,6 +5,7 @@
 enum class ToolbarIcon {
     NewPackage,
     OpenPackage,
+    Import,
     Save,
     AddPartition,
     DeletePartition,

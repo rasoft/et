@@ -35,6 +35,19 @@ void paintFolder(QPainter *painter) {
     painter->drawPath(folder);
 }
 
+void paintImport(QPainter *painter) {
+    QPainterPath box;
+    box.moveTo(7.4, 3.0);
+    box.lineTo(13.6, 3.0);
+    box.lineTo(13.6, 13.0);
+    box.lineTo(7.4, 13.0);
+    box.closeSubpath();
+    painter->drawPath(box);
+    painter->drawLine(QPointF(2.0, 8.0), QPointF(8.6, 8.0));
+    painter->drawLine(QPointF(6.2, 5.6), QPointF(8.8, 8.0));
+    painter->drawLine(QPointF(6.2, 10.4), QPointF(8.8, 8.0));
+}
+
 void paintFloppy(QPainter *painter) {
     painter->drawRoundedRect(QRectF(3.2, 2.4, 9.6, 11.4), 1.3, 1.3);
     painter->drawLine(QPointF(5.4, 2.4), QPointF(5.4, 6.0));
@@ -116,6 +129,9 @@ public:
             break;
         case ToolbarIcon::OpenPackage:
             paintFolder(painter);
+            break;
+        case ToolbarIcon::Import:
+            paintImport(painter);
             break;
         case ToolbarIcon::Save:
             paintFloppy(painter);

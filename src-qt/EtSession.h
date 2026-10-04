@@ -42,6 +42,34 @@ struct DocumentView {
     static bool parse(const QString &json, DocumentView *out, QString *error);
 };
 
+struct ImportPartitionChoice {
+    QString name;
+    quint64 startBytes = 0;
+    bool hasSizeBytes = false;
+    quint64 sizeBytes = 0;
+};
+
+struct ImportImageChoice {
+    quint32 index = 0;
+    QString partitionName;
+    QString fileName;
+    bool available = false;
+    bool hasBytes = false;
+    quint64 bytes = 0;
+    QString message;
+};
+
+struct ImportPreview {
+    quint32 sectorSize = 512;
+    bool hasUserAreaBytes = false;
+    quint64 userAreaBytes = 0;
+    QString tableType;
+    QVector<ImportPartitionChoice> partitions;
+    QVector<ImportImageChoice> images;
+
+    static bool parse(const QString &json, ImportPreview *out, QString *error);
+};
+
 namespace EtSession {
 
 bool createPackage(const QString &directory, const QString &name, quint64 userAreaBytes,
@@ -49,6 +77,9 @@ bool createPackage(const QString &directory, const QString &name, quint64 userAr
 
 bool openPackage(const QString &directory, bool discardUnsaved, QString *viewJson, QString *error);
 
-bool importPackage(const QString &sourceFile, QString *viewJson, QString *error);
+bool previewImport(const QString &sourceFile, QString *previewJson, QString *error);
+
+bool importPackage(const QString &sourceFile, const QString &selectionJson, QString *viewJson,
+                   QString *error);
 
 }

@@ -55,14 +55,29 @@ int32_t et_open_package(
     char **out_view,
     char **out_error);
 
-/* 把 flash.conf 或 genflash merge 的 download.bin 写入当前打开的包。
- * source_utf8 是源文件，以 NUL 结尾的 UTF-8。包目录和名称不变。
- * 没有打开的包时失败。成功返回 0，*out_view 是 DocumentView。
- * 失败返回 1，*out_error 是说明，当前文档保持不变。
- * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
+/* 列出 flash.conf 或 download.bin 里可导入的分区表和镜像。不改当前包。
+ * source_utf8 是源文件，以 NUL 结尾的 UTF-8。成功返回 0，*out_preview 是 JSON：
+ * sectorSize、userAreaBytes、tableType、partitions[{name,startBytes,sizeBytes}]、
+ * images[{index,partition,fileName,bytes,available,message}]。
+ * 失败返回 1，*out_error 是说明。两个出参必须非空；函数会先把它们置为 NULL。
+ * 调用方用 et_string_free 交还。
+ */
+int32_t et_preview_import(
+    const char *source_utf8,
+    char **out_preview,
+    char **out_error);
+
+/* 按勾选把 flash.conf 或 download.bin 写入当前打开的包。
+ * source_utf8 是源文件。selection_utf8 是 JSON：
+ * {"importTable":true,"images":[0,2]}，images 是预览里的分区序号。
+ * 都是以 NUL 结尾的 UTF-8。包目录和名称不变。没有打开的包时失败。
+ * 成功返回 0，*out_view 是 DocumentView。失败返回 1，*out_error 是说明，
+ * 当前文档保持不变。两个出参必须非空；函数会先把它们置为 NULL。
+ * 调用方用 et_string_free 交还。
  */
 int32_t et_import_package(
     const char *source_utf8,
+    const char *selection_utf8,
     char **out_view,
     char **out_error);
 

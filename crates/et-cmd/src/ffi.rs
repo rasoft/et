@@ -111,10 +111,40 @@ pub extern "C" fn et_open_package(
     }
 }
 
-/// 把 flash.conf 或 download.bin 写入当前打开的包。失败时不改当前会话。
+/// 列出可导入的分区表和镜像。不改当前会话。
+#[no_mangle]
+pub extern "C" fn et_preview_import(
+    source_utf8: *const c_char,
+    out_preview: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_preview.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_preview = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let source = c_str(source_utf8, "文件")?;
+        crate::session::Session::preview_import(Path::new(source))
+    })();
+
+    match result {
+        Ok(json) => write_out(out_preview, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
+/// 按勾选把 flash.conf 或 download.bin 写入当前打开的包。失败时不改当前会话。
 #[no_mangle]
 pub extern "C" fn et_import_package(
     source_utf8: *const c_char,
+    selection_utf8: *const c_char,
     out_view: *mut *mut c_char,
     out_error: *mut *mut c_char,
 ) -> i32 {
@@ -128,7 +158,8 @@ pub extern "C" fn et_import_package(
 
     let result = (|| {
         let source = c_str(source_utf8, "文件")?;
-        let view = with_session(|session| session.import_package(Path::new(source)))?;
+        let selection = c_str(selection_utf8, "选择")?;
+        let view = with_session(|session| session.import_package(Path::new(source), selection))?;
         view.to_json()
     })();
 
@@ -170,8 +201,8 @@ fn write_out(slot: *mut *mut c_char, text: String) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        et_abi_version, et_create_package, et_import_package, et_open_package, et_string_free,
-        et_version,
+        et_abi_version, et_create_package, et_import_package, et_open_package, et_preview_import,
+        et_string_free, et_version,
     };
     use std::ffi::{CStr, CString};
     use std::fs;
@@ -315,7 +346,12 @@ mod tests {
         let _session = session_test_lock();
         let source = CString::new("unused").unwrap();
         assert_eq!(
-            et_import_package(source.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(),),
+            et_import_package(
+                source.as_ptr(),
+                source.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
             1
         );
 
@@ -341,7 +377,13 @@ mod tests {
         let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
         view = std::ptr::null_mut();
         error = std::ptr::null_mut();
-        let rc = et_import_package(missing_c.as_ptr(), &mut view, &mut error);
+        let selection = CString::new(r#"{"importTable":true,"images":[]}"#).unwrap();
+        let rc = et_import_package(
+            missing_c.as_ptr(),
+            selection.as_ptr(),
+            &mut view,
+            &mut error,
+        );
         assert_eq!(rc, 1);
         assert!(view.is_null());
         assert!(package.join("manifest.json").is_file());
@@ -359,7 +401,18 @@ mod tests {
         let conf_c = CString::new(conf.to_str().unwrap()).unwrap();
         view = std::ptr::null_mut();
         error = std::ptr::null_mut();
-        let rc = et_import_package(conf_c.as_ptr(), &mut view, &mut error);
+        let rc = et_preview_import(conf_c.as_ptr(), &mut view, &mut error);
+        assert_eq!(rc, 0);
+        assert!(error.is_null());
+        let preview_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
+        assert!(preview_text.contains("\"fileName\":\"boot.img\""));
+        assert!(preview_text.contains("\"name\":\"boot\""));
+        et_string_free(view);
+
+        view = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let chosen = CString::new(r#"{"importTable":true,"images":[0]}"#).unwrap();
+        let rc = et_import_package(conf_c.as_ptr(), chosen.as_ptr(), &mut view, &mut error);
         assert_eq!(rc, 0, "{}", unsafe {
             if error.is_null() {
                 String::new()

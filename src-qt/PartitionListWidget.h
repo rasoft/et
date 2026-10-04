@@ -18,7 +18,8 @@ class PartitionListWidget : public QTableView {
 
 public:
     enum Column {
-        Name = 0,
+        Selected = 0,
+        Name,
         StartSector,
         SectorCount,
         Capacity,
@@ -35,4 +36,11 @@ public:
 
 signals:
     void selectionChanged(bool hasSelection);
+
+private:
+    void updateHeaderCheck();
+    void setAllRowChecks(Qt::CheckState state);
+    void applyHeaderCheck();
+
+    bool m_updatingChecks = false;
 };

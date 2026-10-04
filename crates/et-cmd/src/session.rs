@@ -112,9 +112,19 @@ impl Session {
         Ok(view)
     }
 
-    /// 把 flash.conf 或 download.bin 写入当前打开的包。目录和名称不变。
+    /// 列出源文件里的分区表和镜像。不改当前包。
+    pub fn preview_import(source: &Path) -> Result<String, Error> {
+        et_core::import::preview_import(source)
+    }
+
+    /// 按勾选把 flash.conf 或 download.bin 写入当前打开的包。目录和名称不变。
     /// 没有打开的包时失败，失败时不改会话。
-    pub fn import_package(&mut self, source: &Path) -> Result<DocumentView, Error> {
+    pub fn import_package(
+        &mut self,
+        source: &Path,
+        selection_json: &str,
+    ) -> Result<DocumentView, Error> {
+        let selection = et_core::import::selection_from_json(selection_json)?;
         let root = self
             .root
             .clone()
@@ -123,7 +133,7 @@ impl Session {
             .manifest
             .clone()
             .ok_or_else(|| Error::new("没有打开的包"))?;
-        let manifest = et_core::import::import_into_package(source, &root, &current)?;
+        let manifest = et_core::import::import_selected(source, &root, &current, &selection)?;
         self.manifest = Some(manifest);
         self.dirty = false;
         self.view()
@@ -386,7 +396,10 @@ mod tests {
         let tmp = TempDir::new();
         let mut closed = Session::new();
         let err = closed
-            .import_package(&tmp.path().join("flash.conf"))
+            .import_package(
+                &tmp.path().join("flash.conf"),
+                r#"{"importTable":true,"images":[]}"#,
+            )
             .unwrap_err();
         assert_eq!(err.message(), "没有打开的包");
 
@@ -411,7 +424,9 @@ boot boot.img true RAW ro 1 7 0x800 0x400
 ",
         )
         .unwrap();
-        let view = session.import_package(&conf).unwrap();
+        let view = session
+            .import_package(&conf, r#"{"importTable":true,"images":[0]}"#)
+            .unwrap();
         assert!(!view.dirty);
         assert_eq!(view.root, root);
         assert_eq!(view.metadata.name, "first");
@@ -428,7 +443,9 @@ boot boot.img true RAW ro 1 7 0x800 0x400
 
         let missing = tmp.path().join("missing.conf");
         fs::write(&missing, b"not a conf").unwrap();
-        let err = session.import_package(&missing).unwrap_err();
+        let err = session
+            .import_package(&missing, r#"{"importTable":true,"images":[]}"#)
+            .unwrap_err();
         assert!(err.message().contains("9 列") || err.message().contains("无法识别"));
         assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
         assert_eq!(

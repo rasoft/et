@@ -1,6 +1,6 @@
 //! 把 flash.conf 或 genflash merge 的 download.bin 写入已经打开的 `.etpk`。
 //!
-//! 包目录、名称和说明保持不变，分区和镜像按导入内容替换。
+//! 包目录、名称和说明保持不变。可以只导入分区表、只导入部分镜像，或两者一起导入。
 //! `table_type` 为 gpt 时，配置里的地址、大小和 `flash_size` 以 `block_size` 为单位，
 //! 这里乘成字节。其他表类型按字节解释。分区起点按配置里的地址固定，不重新自动排布。
 //! 最后一条分区的大小可以是 `auto`。包里不写 eMMC 容量，下载时再按开发板的真实容量占满剩余空间。
@@ -22,17 +22,120 @@ use crate::manifest::{Manifest, Metadata, Partition};
 use crate::merge_bin::{self, MergeSubfile};
 use crate::validate::{inspect_relative, partition_name_issue, InsidePath};
 
-/// 把源文件里的分区和镜像写入 `root` 上已经打开的包。
+/// 用户勾选的导入范围。`images` 是分区在配置里的序号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSelection {
+    pub import_table: bool,
+    pub images: Vec<u32>,
+}
+
+/// 解析界面传来的选择。格式是 `{"importTable":true,"images":[0,2]}`。
+pub fn selection_from_json(text: &str) -> Result<ImportSelection, Error> {
+    let value: Value = serde_json::from_str(text).map_err(|_| Error::new("导入选择无法解析"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Error::new("导入选择无法解析"))?;
+    let import_table = object
+        .get("importTable")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::new("导入选择缺少 importTable"))?;
+    let listed = object
+        .get("images")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::new("导入选择缺少 images"))?;
+    let mut images = Vec::with_capacity(listed.len());
+    for item in listed {
+        let index = item
+            .as_u64()
+            .ok_or_else(|| Error::new("导入选择里的镜像序号无效"))?;
+        if index > u64::from(u32::MAX) {
+            return Err(Error::new("导入选择里的镜像序号无效"));
+        }
+        images.push(index as u32);
+    }
+    Ok(ImportSelection {
+        import_table,
+        images,
+    })
+}
+
+/// 列出源文件里的分区表和镜像，不改当前包。
 ///
-/// 先完整解析，再复制新镜像。manifest 写成功之后才删除被替换掉的旧镜像。
-/// 中途失败时，原来的 manifest 和镜像都还在。
+/// 找不到的镜像仍出现在列表里，并标成不可导入。分区表本身能确定时，预览成功。
+pub fn preview_import(source: &Path) -> Result<String, Error> {
+    let plan = plan(source)?;
+    let mut partitions = Vec::with_capacity(plan.partitions.len());
+    let mut images = Vec::new();
+    for (index, part) in plan.partitions.iter().enumerate() {
+        partitions.push(serde_json::json!({
+            "name": part.name,
+            "startBytes": part.start_bytes,
+            "sizeBytes": part.size_bytes,
+        }));
+        let Some(file_name) = &part.image_label else {
+            continue;
+        };
+        let (available, bytes, message) = match &part.image {
+            PlannedImage::File { bytes, .. } => (true, Some(*bytes), None),
+            PlannedImage::Missing { message } => (false, None, Some(message.as_str())),
+            PlannedImage::Absent => continue,
+        };
+        images.push(serde_json::json!({
+            "index": index as u32,
+            "partition": part.name,
+            "fileName": file_name,
+            "bytes": bytes,
+            "available": available,
+            "message": message,
+        }));
+    }
+    let preview = serde_json::json!({
+        "sectorSize": plan.sector_size,
+        "userAreaBytes": plan.user_area_bytes,
+        "tableType": plan.table_type,
+        "partitions": partitions,
+        "images": images,
+    });
+    serde_json::to_string(&preview).map_err(|err| Error::new(format!("无法生成导入预览：{err}")))
+}
+
+/// 把源文件里的全部分区表和可用镜像写入 `root` 上已经打开的包。
+///
+/// 任一镜像缺失时失败，且不改包。manifest 写成功之后才删除被替换掉的旧镜像。
 pub fn import_into_package(
     source: &Path,
     root: &Path,
     manifest: &Manifest,
 ) -> Result<Manifest, Error> {
     let plan = plan(source)?;
-    apply_plan(root, manifest, plan)
+    let selection = selection_for_everything(&plan)?;
+    apply_selected(root, manifest, plan, &selection)
+}
+
+/// 按勾选写入。失败时原来的 manifest 和镜像都还在。
+pub fn import_selected(
+    source: &Path,
+    root: &Path,
+    manifest: &Manifest,
+    selection: &ImportSelection,
+) -> Result<Manifest, Error> {
+    let plan = plan(source)?;
+    apply_selected(root, manifest, plan, selection)
+}
+
+fn selection_for_everything(plan: &Plan) -> Result<ImportSelection, Error> {
+    let mut images = Vec::new();
+    for (index, part) in plan.partitions.iter().enumerate() {
+        match &part.image {
+            PlannedImage::Missing { message } => return Err(Error::new(message.clone())),
+            PlannedImage::File { .. } => images.push(index as u32),
+            PlannedImage::Absent => {}
+        }
+    }
+    Ok(ImportSelection {
+        import_table: true,
+        images,
+    })
 }
 
 struct Plan {
@@ -51,8 +154,15 @@ struct PlannedPartition {
     name: String,
     start_bytes: u64,
     size_bytes: Option<u64>,
-    image: Option<Vec<ImageSpan>>,
+    image: PlannedImage,
+    image_label: Option<String>,
     extra: Map<String, Value>,
+}
+
+enum PlannedImage {
+    Absent,
+    File { spans: Vec<ImageSpan>, bytes: u64 },
+    Missing { message: String },
 }
 
 fn plan(source: &Path) -> Result<Plan, Error> {
@@ -148,41 +258,66 @@ fn merge_image(
     path: &Path,
     pool: &mut HashMap<String, VecDeque<(u64, u64)>>,
     part: &FlashPartition,
-) -> Result<Option<Vec<ImageSpan>>, Error> {
+) -> Result<PlannedImage, Error> {
     let Some(file_name) = &part.file else {
-        return Ok(None);
+        return Ok(PlannedImage::Absent);
     };
     let base = Path::new(file_name)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::new(format!("分区 {} 的镜像文件名无效", part.name)))?;
-    let (start, len) = pool
-        .get_mut(base)
-        .and_then(VecDeque::pop_front)
-        .ok_or_else(|| Error::new(format!("merge 文件里没有分区 {} 的镜像 {base}", part.name)))?;
-    Ok(Some(vec![ImageSpan {
-        path: path.to_path_buf(),
-        offset: start,
-        length: len,
-    }]))
+    let Some((start, len)) = pool.get_mut(base).and_then(VecDeque::pop_front) else {
+        return Ok(PlannedImage::Missing {
+            message: format!("merge 文件里没有分区 {} 的镜像 {base}", part.name),
+        });
+    };
+    Ok(PlannedImage::File {
+        spans: vec![ImageSpan {
+            path: path.to_path_buf(),
+            offset: start,
+            length: len,
+        }],
+        bytes: len,
+    })
 }
 
 fn conf_image(
     conf_path: &Path,
     conf: &FlashConfig,
     part: &FlashPartition,
-) -> Result<Option<Vec<ImageSpan>>, Error> {
+) -> Result<PlannedImage, Error> {
     let Some(file_name) = &part.file else {
-        return Ok(None);
+        return Ok(PlannedImage::Absent);
     };
     let mut spans = Vec::new();
     if part.name == "KERNEL" {
         if let Some(dtb) = &conf.dtb_file {
-            spans.push(resolve_sibling(conf_path, dtb, &part.name)?);
+            match resolve_sibling(conf_path, dtb, &part.name) {
+                Ok(span) => spans.push(span),
+                Err(err) if image_is_missing(&err) => {
+                    return Ok(PlannedImage::Missing {
+                        message: err.message().to_string(),
+                    });
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
-    spans.push(resolve_sibling(conf_path, file_name, &part.name)?);
-    Ok(Some(spans))
+    match resolve_sibling(conf_path, file_name, &part.name) {
+        Ok(span) => spans.push(span),
+        Err(err) if image_is_missing(&err) => {
+            return Ok(PlannedImage::Missing {
+                message: err.message().to_string(),
+            });
+        }
+        Err(err) => return Err(err),
+    }
+    let bytes = span_len(&spans)?;
+    Ok(PlannedImage::File { spans, bytes })
+}
+
+fn image_is_missing(err: &Error) -> bool {
+    err.message().contains("找不到")
 }
 
 fn resolve_sibling(conf_path: &Path, file_name: &str, partition: &str) -> Result<ImageSpan, Error> {
@@ -221,7 +356,7 @@ fn resolve_sibling(conf_path: &Path, file_name: &str, partition: &str) -> Result
     })
 }
 
-fn finish(conf: FlashConfig, images: Vec<Option<Vec<ImageSpan>>>) -> Result<Plan, Error> {
+fn finish(conf: FlashConfig, images: Vec<PlannedImage>) -> Result<Plan, Error> {
     let sector = sector_size(conf.block_size)?;
     let gpt = conf.table_type.eq_ignore_ascii_case("gpt");
     let flash_bytes = match conf.flash_size {
@@ -233,8 +368,13 @@ fn finish(conf: FlashConfig, images: Vec<Option<Vec<ImageSpan>>>) -> Result<Plan
     for (index, (part, image)) in conf.partitions.into_iter().zip(images).enumerate() {
         let start_bytes = units_to_bytes(gpt, conf.block_size, part.address)?;
         let image_len = match &image {
-            Some(spans) => Some(span_len(spans)?),
-            None => None,
+            PlannedImage::File { bytes, .. } => Some(*bytes),
+            PlannedImage::Missing { message }
+                if matches!(part.size, FlashSize::Auto) && index != last =>
+            {
+                return Err(Error::new(message.clone()));
+            }
+            PlannedImage::Absent | PlannedImage::Missing { .. } => None,
         };
         let size_bytes = partition_size(gpt, sector, index == last, &part, image_len)?;
         partitions.push(PlannedPartition {
@@ -242,6 +382,7 @@ fn finish(conf: FlashConfig, images: Vec<Option<Vec<ImageSpan>>>) -> Result<Plan
             start_bytes,
             size_bytes,
             image,
+            image_label: image_label(conf.dtb_file.as_deref(), &part),
             extra: partition_extra(&part),
         });
     }
@@ -391,6 +532,16 @@ fn align_up(value: u64, alignment: u64) -> Option<u64> {
     }
 }
 
+fn image_label(dtb_file: Option<&str>, part: &FlashPartition) -> Option<String> {
+    let file = part.file.as_ref()?;
+    if part.name == "KERNEL" {
+        if let Some(dtb) = dtb_file {
+            return Some(format!("{dtb} + {file}"));
+        }
+    }
+    Some(file.clone())
+}
+
 fn partition_extra(part: &FlashPartition) -> Map<String, Value> {
     let mut extra = Map::new();
     if let Some(file) = &part.file {
@@ -410,7 +561,48 @@ fn partition_extra(part: &FlashPartition) -> Map<String, Value> {
     extra
 }
 
-fn apply_plan(root: &Path, current: &Manifest, plan: Plan) -> Result<Manifest, Error> {
+fn chosen_images(plan: &Plan, indexes: &[u32]) -> Result<HashSet<u32>, Error> {
+    let mut chosen = HashSet::new();
+    for index in indexes {
+        if !chosen.insert(*index) {
+            return Err(Error::new("镜像选择重复"));
+        }
+        let Some(part) = plan.partitions.get(*index as usize) else {
+            return Err(Error::new("镜像序号超出范围"));
+        };
+        match &part.image {
+            PlannedImage::File { .. } => {}
+            PlannedImage::Missing { message } => return Err(Error::new(message.clone())),
+            PlannedImage::Absent => {
+                return Err(Error::new(format!("分区 {} 没有镜像文件", part.name)));
+            }
+        }
+    }
+    Ok(chosen)
+}
+
+fn apply_selected(
+    root: &Path,
+    current: &Manifest,
+    plan: Plan,
+    selection: &ImportSelection,
+) -> Result<Manifest, Error> {
+    let chosen = chosen_images(&plan, &selection.images)?;
+    if selection.import_table {
+        apply_table(root, current, plan, &chosen)
+    } else if chosen.is_empty() {
+        Err(Error::new("没有选择要导入的内容"))
+    } else {
+        apply_images_only(root, current, plan, &chosen)
+    }
+}
+
+fn apply_table(
+    root: &Path,
+    current: &Manifest,
+    plan: Plan,
+    chosen: &HashSet<u32>,
+) -> Result<Manifest, Error> {
     let mut next = current.clone();
     next.metadata.sector_size = plan.sector_size;
     next.metadata.user_area_bytes = plan.user_area_bytes;
@@ -419,19 +611,37 @@ fn apply_plan(root: &Path, current: &Manifest, plan: Plan) -> Result<Manifest, E
     next.metadata.validate()?;
     next.partitions.clear();
 
+    let mut reused = reusable_images(current);
     let mut installed = InstalledImages {
         root: root.to_path_buf(),
         ids: Vec::new(),
         armed: true,
     };
-    for planned in plan.partitions {
-        let id = new_partition_id();
-        let image = if let Some(spans) = planned.image {
+    for (index, planned) in plan.partitions.into_iter().enumerate() {
+        let import_image = chosen.contains(&(index as u32));
+        let (id, image, extra) = if import_image {
+            let spans = match planned.image {
+                PlannedImage::File { spans, .. } => spans,
+                PlannedImage::Missing { message } => return Err(Error::new(message)),
+                PlannedImage::Absent => {
+                    return Err(Error::new(format!("分区 {} 没有镜像文件", planned.name)));
+                }
+            };
+            let id = new_partition_id();
             disk::install_image(root, &id, &spans)?;
             installed.ids.push(id.clone());
-            Some(format!("images/{id}.img"))
+            (id.clone(), Some(format!("images/{id}.img")), planned.extra)
+        } else if matches!(planned.image, PlannedImage::Absent) {
+            let mut extra = planned.extra;
+            extra.remove("sourceFile");
+            (new_partition_id(), None, extra)
         } else {
-            None
+            let mut extra = planned.extra;
+            extra.remove("sourceFile");
+            match take_reused_image(&mut reused, &planned.name, &mut extra) {
+                Some((id, image)) => (id, Some(image), extra),
+                None => (new_partition_id(), None, extra),
+            }
         };
         next.partitions.push(Partition {
             id,
@@ -441,13 +651,108 @@ fn apply_plan(root: &Path, current: &Manifest, plan: Plan) -> Result<Manifest, E
             partition_type: "linux-filesystem".to_string(),
             attributes: 0,
             image,
-            extra: planned.extra,
+            extra,
         });
     }
     disk::save_manifest(root, &next)?;
     installed.disarm();
     remove_replaced_images(root, &current.partitions, &next.partitions);
     Ok(next)
+}
+
+fn apply_images_only(
+    root: &Path,
+    current: &Manifest,
+    plan: Plan,
+    chosen: &HashSet<u32>,
+) -> Result<Manifest, Error> {
+    for index in chosen {
+        let name = &plan.partitions[*index as usize].name;
+        if !current.partitions.iter().any(|part| part.name == *name) {
+            return Err(Error::new(format!(
+                "当前镜像包没有名为 {name} 的分区，无法只导入它的镜像"
+            )));
+        }
+    }
+
+    let mut next = current.clone();
+    let mut installed = InstalledImages {
+        root: root.to_path_buf(),
+        ids: Vec::new(),
+        armed: true,
+    };
+    for index in chosen {
+        let planned = &plan.partitions[*index as usize];
+        let spans = match &planned.image {
+            PlannedImage::File { spans, .. } => spans,
+            PlannedImage::Missing { message } => return Err(Error::new(message.clone())),
+            PlannedImage::Absent => {
+                return Err(Error::new(format!("分区 {} 没有镜像文件", planned.name)));
+            }
+        };
+        let id = new_partition_id();
+        disk::install_image(root, &id, spans)?;
+        installed.ids.push(id.clone());
+        let target = next
+            .partitions
+            .iter_mut()
+            .find(|part| part.name == planned.name)
+            .ok_or_else(|| Error::new(format!("当前镜像包没有名为 {} 的分区", planned.name)))?;
+        if let Some(source_file) = planned.extra.get("sourceFile") {
+            target
+                .extra
+                .insert("sourceFile".to_string(), source_file.clone());
+        }
+        target.id = id.clone();
+        target.image = Some(format!("images/{id}.img"));
+    }
+    disk::save_manifest(root, &next)?;
+    installed.disarm();
+    remove_replaced_images(root, &current.partitions, &next.partitions);
+    Ok(next)
+}
+
+struct ReusedImage {
+    id: String,
+    name: String,
+    image: String,
+    source_file: Option<Value>,
+    taken: bool,
+}
+
+fn reusable_images(current: &Manifest) -> Vec<ReusedImage> {
+    current
+        .partitions
+        .iter()
+        .filter_map(|part| {
+            let image = part.image.as_ref()?;
+            if image != &format!("images/{}.img", part.id) {
+                return None;
+            }
+            Some(ReusedImage {
+                id: part.id.clone(),
+                name: part.name.clone(),
+                image: image.clone(),
+                source_file: part.extra.get("sourceFile").cloned(),
+                taken: false,
+            })
+        })
+        .collect()
+}
+
+fn take_reused_image(
+    old: &mut [ReusedImage],
+    name: &str,
+    extra: &mut Map<String, Value>,
+) -> Option<(String, String)> {
+    let slot = old
+        .iter_mut()
+        .find(|slot| !slot.taken && slot.name == name)?;
+    slot.taken = true;
+    if let Some(source_file) = &slot.source_file {
+        extra.insert("sourceFile".to_string(), source_file.clone());
+    }
+    Some((slot.id.clone(), slot.image.clone()))
 }
 
 fn clear_vendor_keys(metadata: &mut Metadata) {
@@ -564,7 +869,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::import_into_package;
+    use super::{import_into_package, import_selected, preview_import, ImportSelection};
     use crate::disk::{create_package, open_package};
     use crate::manifest::{Metadata, Partition};
 
@@ -929,5 +1234,197 @@ b boot.img true RAW ro 0 0 0x900 0x100
         let image = manifest.partitions[0].image.as_deref().unwrap();
         assert_eq!(fs::read(root.join(image)).unwrap(), b"NEW");
         assert_eq!(open_package(&root).unwrap().manifest.metadata.name, "board");
+    }
+
+    #[test]
+    fn preview_lists_choices_and_partial_import_leaves_the_rest() {
+        let tmp = TempDir::new();
+        fs::write(tmp.0.join("boot.img"), b"NEW-BOOT").unwrap();
+        fs::write(tmp.0.join("rootfs.img"), b"NEW-ROOT").unwrap();
+        let conf = tmp.0.join("flash.conf");
+        fs::write(
+            &conf,
+            "\
+block_size 512
+table_type gpt
+flash_size 0x10000
+
+boot boot.img true RAW ro 0 0 0x800 0x100
+rootfs rootfs.img true RAW ro 0 0 0x900 0x200
+empty NULL true RAW ro 0 0 0xB00 0x100
+",
+        )
+        .unwrap();
+        let preview: serde_json::Value =
+            serde_json::from_str(&preview_import(&conf).unwrap()).unwrap();
+        assert_eq!(preview["tableType"], "gpt");
+        assert_eq!(preview["partitions"].as_array().unwrap().len(), 3);
+        assert_eq!(preview["partitions"][0]["name"], "boot");
+        assert_eq!(preview["partitions"][0]["startBytes"], 0x800 * 512);
+        let images = preview["images"].as_array().unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0]["index"], 0);
+        assert_eq!(images[0]["fileName"], "boot.img");
+        assert_eq!(images[0]["partition"], "boot");
+        assert_eq!(images[0]["available"], true);
+        assert_eq!(images[0]["bytes"], 8);
+        assert_eq!(images[1]["index"], 1);
+        assert_eq!(images[1]["fileName"], "rootfs.img");
+
+        let missing = tmp.0.join("missing.conf");
+        fs::write(
+            &missing,
+            "block_size 512\ntable_type gpt\nflash_size 0x10000\nboot gone.img true RAW ro 0 0 0x800 0x100\n",
+        )
+        .unwrap();
+        let preview: serde_json::Value =
+            serde_json::from_str(&preview_import(&missing).unwrap()).unwrap();
+        assert_eq!(preview["images"][0]["available"], false);
+        assert!(preview["images"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("找不到"));
+
+        let root = tmp.0.join("board.etpk");
+        let mut created = create_package(
+            &root,
+            Metadata::try_new("board", 32 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        let old_id = "11111111-2222-4333-8444-555555555555";
+        let old_image = format!("images/{old_id}.img");
+        fs::write(root.join(&old_image), b"OLD-BOOT").unwrap();
+        created.manifest.partitions.push(Partition {
+            id: old_id.to_string(),
+            name: "boot".to_string(),
+            size_bytes: Some(4096),
+            start_bytes: Some(2 * 1024 * 1024),
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: Some(old_image.clone()),
+            extra: serde_json::Map::new(),
+        });
+        created.manifest.partitions.push(Partition {
+            id: "22222222-3333-4444-8555-666666666666".to_string(),
+            name: "rootfs".to_string(),
+            size_bytes: Some(8192),
+            start_bytes: Some(3 * 1024 * 1024),
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: None,
+            extra: serde_json::Map::new(),
+        });
+        crate::disk::save_manifest(&root, &created.manifest).unwrap();
+
+        let err = import_selected(
+            &conf,
+            &root,
+            &created.manifest,
+            &ImportSelection {
+                import_table: false,
+                images: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.message(), "没有选择要导入的内容");
+        assert_eq!(fs::read(root.join(&old_image)).unwrap(), b"OLD-BOOT");
+
+        let manifest = import_selected(
+            &conf,
+            &root,
+            &created.manifest,
+            &ImportSelection {
+                import_table: false,
+                images: vec![0],
+            },
+        )
+        .unwrap();
+        assert_eq!(manifest.metadata.name, "board");
+        assert_eq!(manifest.partitions.len(), 2);
+        assert_eq!(manifest.partitions[0].start_bytes, Some(2 * 1024 * 1024));
+        assert_eq!(manifest.partitions[0].size_bytes, Some(4096));
+        assert_eq!(manifest.partitions[1].start_bytes, Some(3 * 1024 * 1024));
+        assert!(manifest.partitions[1].image.is_none());
+        let boot_image = manifest.partitions[0].image.as_deref().unwrap();
+        assert_eq!(fs::read(root.join(boot_image)).unwrap(), b"NEW-BOOT");
+        assert!(!root.join(&old_image).exists());
+
+        let manifest = import_selected(
+            &conf,
+            &root,
+            &manifest,
+            &ImportSelection {
+                import_table: true,
+                images: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(manifest.partitions.len(), 3);
+        assert_eq!(manifest.partitions[0].name, "boot");
+        assert_eq!(manifest.partitions[0].start_bytes, Some(0x800 * 512));
+        assert_eq!(manifest.partitions[0].size_bytes, Some(0x100 * 512));
+        assert_eq!(manifest.partitions[1].name, "rootfs");
+        assert_eq!(manifest.partitions[1].start_bytes, Some(0x900 * 512));
+        assert!(manifest.partitions[1].image.is_none());
+        assert_eq!(manifest.partitions[2].name, "empty");
+        assert!(manifest.partitions[2].image.is_none());
+        let kept = manifest.partitions[0].image.as_deref().unwrap();
+        assert_eq!(fs::read(root.join(kept)).unwrap(), b"NEW-BOOT");
+
+        let before = fs::read(root.join("manifest.json")).unwrap();
+        let err = import_selected(
+            &missing,
+            &root,
+            &manifest,
+            &ImportSelection {
+                import_table: true,
+                images: vec![0],
+            },
+        )
+        .unwrap_err();
+        assert!(err.message().contains("找不到"));
+        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), before);
+
+        let manifest = import_selected(
+            &conf,
+            &root,
+            &manifest,
+            &ImportSelection {
+                import_table: false,
+                images: vec![1],
+            },
+        )
+        .unwrap();
+        assert_eq!(manifest.partitions[1].start_bytes, Some(0x900 * 512));
+        assert_eq!(manifest.partitions[1].size_bytes, Some(0x200 * 512));
+        let rootfs = manifest.partitions[1].image.as_deref().unwrap();
+        assert_eq!(fs::read(root.join(rootfs)).unwrap(), b"NEW-ROOT");
+        assert_eq!(
+            fs::read(root.join(manifest.partitions[0].image.as_deref().unwrap())).unwrap(),
+            b"NEW-BOOT"
+        );
+
+        fs::write(tmp.0.join("logo.img"), b"LOGO").unwrap();
+        let logo = tmp.0.join("logo.conf");
+        fs::write(
+            &logo,
+            "block_size 512\ntable_type gpt\nflash_size 0x10000\nlogo logo.img true RAW ro 0 0 0x800 0x100\n",
+        )
+        .unwrap();
+        let err = import_selected(
+            &logo,
+            &root,
+            &manifest,
+            &ImportSelection {
+                import_table: false,
+                images: vec![0],
+            },
+        )
+        .unwrap_err();
+        assert!(err.message().contains("没有名为 logo"));
+        assert_eq!(
+            open_package(&root).unwrap().manifest.partitions[1].name,
+            "rootfs"
+        );
     }
 }

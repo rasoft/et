@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "EtSession.h"
+#include "ImportChoicesDialog.h"
 #include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
@@ -89,10 +90,12 @@ void MainWindow::createActions() {
     m_newPackage->setStatusTip(QStringLiteral("新建镜像包"));
 
     m_openPackage = new QAction(QStringLiteral("打开..."), this);
+    m_openPackage->setIconText(QStringLiteral("打开"));
     m_openPackage->setShortcut(QKeySequence::Open);
     m_openPackage->setStatusTip(QStringLiteral("打开镜像包"));
 
     m_importPackage = new QAction(QStringLiteral("导入..."), this);
+    m_importPackage->setIconText(QStringLiteral("导入"));
     m_importPackage->setStatusTip(QStringLiteral("把 flash.conf 或 download.bin 导入当前镜像包"));
 
     m_savePackage = new QAction(QStringLiteral("保存"), this);
@@ -117,6 +120,7 @@ void MainWindow::createActions() {
 
     m_newPackage->setIcon(toolbarIcon(ToolbarIcon::NewPackage));
     m_openPackage->setIcon(toolbarIcon(ToolbarIcon::OpenPackage));
+    m_importPackage->setIcon(toolbarIcon(ToolbarIcon::Import));
     m_savePackage->setIcon(toolbarIcon(ToolbarIcon::Save));
     m_deletePartition->setIcon(toolbarIcon(ToolbarIcon::DeletePartition));
     m_newPartition->setIcon(toolbarIcon(ToolbarIcon::AddPartition));
@@ -156,10 +160,12 @@ void MainWindow::createToolBar() {
     toolBar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
     toolBar->setIconSize(QSize(24, 24));
     toolBar->addAction(m_newPackage);
+    toolBar->addAction(m_openPackage);
+    toolBar->addAction(m_importPackage);
     toolBar->addAction(m_savePackage);
     toolBar->addSeparator();
-    toolBar->addAction(m_deletePartition);
     toolBar->addAction(m_newPartition);
+    toolBar->addAction(m_deletePartition);
     toolBar->addSeparator();
     toolBar->addAction(m_download);
 }
@@ -413,22 +419,11 @@ void MainWindow::importPackage() {
         return;
     }
 
-    const bool hasPartitions =
-        m_partitionList->model() != nullptr && m_partitionList->model()->rowCount() > 0;
-    if (m_dirty || hasPartitions) {
-        QMessageBox box(this);
-        box.setIcon(QMessageBox::Question);
-        box.setWindowTitle(QStringLiteral("导入"));
-        box.setText(m_dirty ? QStringLiteral("当前镜像包有未保存的修改。导入会丢掉这些修改，并替换其中的"
-                                             "分区和镜像。要继续吗？")
-                            : QStringLiteral("导入会替换当前镜像包中的分区和镜像。要继续吗？"));
-        auto *accept = box.addButton(QStringLiteral("导入"), QMessageBox::AcceptRole);
-        auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-        box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
-        box.exec();
-        if (box.clickedButton() != accept) {
-            return;
-        }
+    bool discardUnsaved = false;
+    if (!confirmReplace(QStringLiteral("导入"),
+                        QStringLiteral("当前镜像包有未保存的修改。继续导入会丢掉这些修改。要继续吗？"),
+                        &discardUnsaved)) {
+        return;
     }
 
     const QString start =
@@ -444,9 +439,24 @@ void MainWindow::importPackage() {
         return;
     }
 
-    QString viewJson;
+    QString previewJson;
     QString error;
-    if (!EtSession::importPackage(source, &viewJson, &error)) {
+    if (!EtSession::previewImport(source, &previewJson, &error)) {
+        showWarning(QStringLiteral("导入"), error);
+        return;
+    }
+    ImportPreview preview;
+    if (!ImportPreview::parse(previewJson, &preview, &error)) {
+        showWarning(QStringLiteral("导入"), error);
+        return;
+    }
+    ImportChoicesDialog dialog(QFileInfo(source).fileName(), preview, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QString viewJson;
+    if (!EtSession::importPackage(source, dialog.selectionJson(), &viewJson, &error)) {
         showWarning(QStringLiteral("导入"), error);
         return;
     }

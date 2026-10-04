@@ -247,14 +247,137 @@ bool EtSession::openPackage(const QString &directory, bool discardUnsaved, QStri
     return true;
 }
 
-bool EtSession::importPackage(const QString &sourceFile, QString *viewJson, QString *error) {
+bool ImportPreview::parse(const QString &json, ImportPreview *out, QString *error) {
+    if (out == nullptr || error == nullptr) {
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        *error = QStringLiteral("导入预览无法解析");
+        return false;
+    }
+    const QJsonObject root = document.object();
+    ImportPreview preview;
+    quint64 sector = 0;
+    if (!readU64(root.value(QStringLiteral("sectorSize")), &sector) || sector > 0xffffffffu) {
+        *error = QStringLiteral("导入预览缺少 sectorSize");
+        return false;
+    }
+    preview.sectorSize = static_cast<quint32>(sector);
+    if (!readOptionalU64(root, QStringLiteral("userAreaBytes"), &preview.hasUserAreaBytes,
+                         &preview.userAreaBytes, error)) {
+        return false;
+    }
+    if (!readString(root, QStringLiteral("tableType"), &preview.tableType, error)) {
+        *error = QStringLiteral("导入预览缺少 tableType");
+        return false;
+    }
+    const QJsonValue partitionsValue = root.value(QStringLiteral("partitions"));
+    if (!partitionsValue.isArray()) {
+        *error = QStringLiteral("导入预览缺少 partitions");
+        return false;
+    }
+    const QJsonArray partitions = partitionsValue.toArray();
+    preview.partitions.reserve(partitions.size());
+    for (const QJsonValue &item : partitions) {
+        if (!item.isObject()) {
+            *error = QStringLiteral("导入预览的分区无效");
+            return false;
+        }
+        const QJsonObject object = item.toObject();
+        ImportPartitionChoice row;
+        if (!readString(object, QStringLiteral("name"), &row.name, error)) {
+            *error = QStringLiteral("导入预览的分区缺少 name");
+            return false;
+        }
+        if (!readU64(object.value(QStringLiteral("startBytes")), &row.startBytes)) {
+            *error = QStringLiteral("导入预览的分区缺少 startBytes");
+            return false;
+        }
+        if (!readOptionalU64(object, QStringLiteral("sizeBytes"), &row.hasSizeBytes, &row.sizeBytes,
+                             error)) {
+            return false;
+        }
+        preview.partitions.append(row);
+    }
+    const QJsonValue imagesValue = root.value(QStringLiteral("images"));
+    if (!imagesValue.isArray()) {
+        *error = QStringLiteral("导入预览缺少 images");
+        return false;
+    }
+    const QJsonArray images = imagesValue.toArray();
+    preview.images.reserve(images.size());
+    for (const QJsonValue &item : images) {
+        if (!item.isObject()) {
+            *error = QStringLiteral("导入预览的镜像无效");
+            return false;
+        }
+        const QJsonObject object = item.toObject();
+        ImportImageChoice row;
+        quint64 index = 0;
+        if (!readU64(object.value(QStringLiteral("index")), &index) || index > 0xffffffffu) {
+            *error = QStringLiteral("导入预览的镜像缺少 index");
+            return false;
+        }
+        row.index = static_cast<quint32>(index);
+        if (!readString(object, QStringLiteral("partition"), &row.partitionName, error)
+            || !readString(object, QStringLiteral("fileName"), &row.fileName, error)
+            || !readBool(object, QStringLiteral("available"), &row.available, error)) {
+            *error = QStringLiteral("导入预览的镜像缺少字段");
+            return false;
+        }
+        if (!readOptionalU64(object, QStringLiteral("bytes"), &row.hasBytes, &row.bytes, error)) {
+            return false;
+        }
+        const QJsonValue message = object.value(QStringLiteral("message"));
+        if (message.isNull()) {
+            row.message.clear();
+        } else if (!message.isString()) {
+            *error = QStringLiteral("导入预览的镜像缺少 message");
+            return false;
+        } else {
+            row.message = message.toString();
+        }
+        preview.images.append(row);
+    }
+    *out = preview;
+    return true;
+}
+
+bool EtSession::previewImport(const QString &sourceFile, QString *previewJson, QString *error) {
+    if (previewJson == nullptr || error == nullptr) {
+        return false;
+    }
+    const QByteArray sourceBytes = sourceFile.toUtf8();
+    char *preview = nullptr;
+    char *message = nullptr;
+    const int32_t rc = et_preview_import(sourceBytes.constData(), &preview, &message);
+    const QString previewText = takeString(preview);
+    const QString errorText = takeString(message);
+    if (rc != 0) {
+        *error = errorText.isEmpty() ? QStringLiteral("无法读取导入内容") : errorText;
+        return false;
+    }
+    if (previewText.isEmpty()) {
+        *error = QStringLiteral("导入预览是空的");
+        return false;
+    }
+    *previewJson = previewText;
+    return true;
+}
+
+bool EtSession::importPackage(const QString &sourceFile, const QString &selectionJson,
+                              QString *viewJson, QString *error) {
     if (viewJson == nullptr || error == nullptr) {
         return false;
     }
     const QByteArray sourceBytes = sourceFile.toUtf8();
+    const QByteArray selectionBytes = selectionJson.toUtf8();
     char *view = nullptr;
     char *message = nullptr;
-    const int32_t rc = et_import_package(sourceBytes.constData(), &view, &message);
+    const int32_t rc = et_import_package(sourceBytes.constData(), selectionBytes.constData(), &view,
+                                         &message);
     const QString viewText = takeString(view);
     const QString errorText = takeString(message);
     if (rc != 0) {
