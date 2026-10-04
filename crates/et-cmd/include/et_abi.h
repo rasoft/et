@@ -41,6 +41,18 @@ int32_t et_create_package(
     char **out_view,
     char **out_error);
 
+/* 打开已有包目录并作为当前文档。dir_utf8 是以 NUL 结尾的 UTF-8。
+ * discard_unsaved 非 0 时，若当前包有未保存修改，先丢掉内存里的修改再打开。
+ * 成功返回 0，*out_view 是 DocumentView。分区起点、镜像长度和校验项都在这份 JSON 里。
+ * 失败返回 1，*out_error 是说明，当前文档保持不变。
+ * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
+ */
+int32_t et_open_package(
+    const char *dir_utf8,
+    int32_t discard_unsaved,
+    char **out_view,
+    char **out_error);
+
 #ifdef __cplusplus
 }
 #endif

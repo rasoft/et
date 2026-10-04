@@ -7,6 +7,7 @@ class PartitionEditorWidget;
 class PartitionListWidget;
 class QAction;
 class QLabel;
+class QListWidget;
 class QWidget;
 struct DocumentView;
 
@@ -18,6 +19,7 @@ public:
 
 private slots:
     void newPackage();
+    void openPackage();
     void importPackage();
     void savePackage();
     void newPartition();
@@ -34,8 +36,11 @@ private:
     void updateActionStates();
     void showPending(const QString &command);
     void applyDocument(const DocumentView &view);
+    bool confirmReplace(const QString &title, const QString &question, bool *discardUnsaved);
+    void showWarning(const QString &title, const QString &text);
 
     QAction *m_newPackage = nullptr;
+    QAction *m_openPackage = nullptr;
     QAction *m_importPackage = nullptr;
     QAction *m_savePackage = nullptr;
     QAction *m_quit = nullptr;
@@ -52,6 +57,8 @@ private:
     QLabel *m_sectorValue = nullptr;
     QLabel *m_alignmentValue = nullptr;
     QLabel *m_stateValue = nullptr;
+    QListWidget *m_issueList = nullptr;
+    QString m_packageRoot;
     bool m_hasDocument = false;
     bool m_dirty = false;
 };

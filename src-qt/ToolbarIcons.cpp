@@ -23,6 +23,18 @@ void paintDocument(QPainter *painter) {
     painter->drawPath(page);
 }
 
+void paintFolder(QPainter *painter) {
+    QPainterPath folder;
+    folder.moveTo(2.2, 4.6);
+    folder.lineTo(2.2, 13.4);
+    folder.lineTo(13.8, 13.4);
+    folder.lineTo(13.8, 6.2);
+    folder.lineTo(7.6, 6.2);
+    folder.lineTo(6.4, 4.6);
+    folder.closeSubpath();
+    painter->drawPath(folder);
+}
+
 void paintFloppy(QPainter *painter) {
     painter->drawRoundedRect(QRectF(3.2, 2.4, 9.6, 11.4), 1.3, 1.3);
     painter->drawLine(QPointF(5.4, 2.4), QPointF(5.4, 6.0));
@@ -101,6 +113,9 @@ public:
         switch (m_kind) {
         case ToolbarIcon::NewPackage:
             paintDocument(painter);
+            break;
+        case ToolbarIcon::OpenPackage:
+            paintFolder(painter);
             break;
         case ToolbarIcon::Save:
             paintFloppy(painter);

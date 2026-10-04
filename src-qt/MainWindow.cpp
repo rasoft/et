@@ -7,9 +7,13 @@
 #include "ToolbarIcons.h"
 
 #include <QAction>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -41,13 +45,22 @@ QString formatBytes(quint64 bytes) {
     return QStringLiteral("%1 字节").arg(bytes);
 }
 
-void showWarning(QWidget *parent, const QString &text) {
-    QMessageBox box(parent);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(QStringLiteral("新建镜像包"));
-    box.setText(text);
-    box.addButton(QStringLiteral("确定"), QMessageBox::AcceptRole);
-    box.exec();
+QString sectorCountText(quint64 bytes, quint32 sectorSize) {
+    if (sectorSize == 0) {
+        return QStringLiteral("—");
+    }
+    return QString::number(bytes / sectorSize);
+}
+
+QString utilizationText(const PartitionView &partition) {
+    if (!partition.hasImage) {
+        return QStringLiteral("—");
+    }
+    if (!partition.hasImageBytes || partition.sizeBytes == 0) {
+        return QStringLiteral("缺失");
+    }
+    const quint64 percent = partition.imageBytes * 100 / partition.sizeBytes;
+    return QStringLiteral("%1%").arg(percent);
 }
 
 } // namespace
@@ -71,6 +84,10 @@ void MainWindow::createActions() {
     m_newPackage->setIconText(QStringLiteral("新建"));
     m_newPackage->setShortcut(QKeySequence::New);
     m_newPackage->setStatusTip(QStringLiteral("新建镜像包"));
+
+    m_openPackage = new QAction(QStringLiteral("打开..."), this);
+    m_openPackage->setShortcut(QKeySequence::Open);
+    m_openPackage->setStatusTip(QStringLiteral("打开镜像包"));
 
     m_importPackage = new QAction(QStringLiteral("导入..."), this);
     m_importPackage->setStatusTip(QStringLiteral("导入镜像包"));
@@ -96,12 +113,14 @@ void MainWindow::createActions() {
     m_download->setStatusTip(QStringLiteral("下载到设备"));
 
     m_newPackage->setIcon(toolbarIcon(ToolbarIcon::NewPackage));
+    m_openPackage->setIcon(toolbarIcon(ToolbarIcon::OpenPackage));
     m_savePackage->setIcon(toolbarIcon(ToolbarIcon::Save));
     m_deletePartition->setIcon(toolbarIcon(ToolbarIcon::DeletePartition));
     m_newPartition->setIcon(toolbarIcon(ToolbarIcon::AddPartition));
     m_download->setIcon(toolbarIcon(ToolbarIcon::Download));
 
     connect(m_newPackage, &QAction::triggered, this, &MainWindow::newPackage);
+    connect(m_openPackage, &QAction::triggered, this, &MainWindow::openPackage);
     connect(m_importPackage, &QAction::triggered, this, &MainWindow::importPackage);
     connect(m_savePackage, &QAction::triggered, this, &MainWindow::savePackage);
     connect(m_quit, &QAction::triggered, this, &QWidget::close);
@@ -113,6 +132,7 @@ void MainWindow::createActions() {
 void MainWindow::createMenus() {
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("文件"));
     fileMenu->addAction(m_newPackage);
+    fileMenu->addAction(m_openPackage);
     fileMenu->addAction(m_importPackage);
     fileMenu->addAction(m_savePackage);
     fileMenu->addSeparator();
@@ -202,9 +222,22 @@ void MainWindow::createCentralWidget() {
     auto *layout = new QVBoxLayout(central);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+    m_issueList = new QListWidget(central);
+    m_issueList->setObjectName(QStringLiteral("issueList"));
+    m_issueList->setMaximumHeight(140);
+    m_issueList->setVisible(false);
+
     layout->addWidget(bar);
     layout->addWidget(splitter, 1);
+    layout->addWidget(m_issueList);
     setCentralWidget(central);
+
+    connect(m_issueList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (item == nullptr) {
+            return;
+        }
+        m_partitionList->selectPartition(item->data(Qt::UserRole).toString());
+    });
 
     connect(m_partitionList, &PartitionListWidget::selectionChanged, this,
             &MainWindow::onPartitionSelectionChanged);
@@ -226,21 +259,41 @@ void MainWindow::showPending(const QString &command) {
     statusBar()->showMessage(QStringLiteral("「%1」尚未实现").arg(command), 3000);
 }
 
+bool MainWindow::confirmReplace(const QString &title, const QString &question, bool *discardUnsaved) {
+    *discardUnsaved = false;
+    if (!m_hasDocument || !m_dirty) {
+        return true;
+    }
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(title);
+    box.setText(question);
+    auto *discard = box.addButton(QStringLiteral("放弃修改"), QMessageBox::AcceptRole);
+    auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
+    box.exec();
+    if (box.clickedButton() != discard) {
+        return false;
+    }
+    *discardUnsaved = true;
+    return true;
+}
+
+void MainWindow::showWarning(const QString &title, const QString &text) {
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(title);
+    box.setText(text);
+    box.addButton(QStringLiteral("确定"), QMessageBox::AcceptRole);
+    box.exec();
+}
+
 void MainWindow::newPackage() {
     bool discardUnsaved = false;
-    if (m_hasDocument && m_dirty) {
-        QMessageBox box(this);
-        box.setIcon(QMessageBox::Question);
-        box.setWindowTitle(QStringLiteral("新建镜像包"));
-        box.setText(QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并新建吗？"));
-        auto *discard = box.addButton(QStringLiteral("放弃修改"), QMessageBox::AcceptRole);
-        auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-        box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
-        box.exec();
-        if (box.clickedButton() != discard) {
-            return;
-        }
-        discardUnsaved = true;
+    if (!confirmReplace(QStringLiteral("新建镜像包"),
+                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并新建吗？"),
+                        &discardUnsaved)) {
+        return;
     }
 
     NewPackageDialog dialog(this);
@@ -249,13 +302,13 @@ void MainWindow::newPackage() {
         QString error;
         if (!EtSession::createPackage(dialog.directory(), dialog.packageName(), dialog.userAreaBytes(),
                                       dialog.sectorSize(), discardUnsaved, &viewJson, &error)) {
-            showWarning(this, error);
+            showWarning(QStringLiteral("新建镜像包"), error);
             continue;
         }
         DocumentView view;
         if (!DocumentView::parse(viewJson, &view, &error)) {
-            showWarning(this, QStringLiteral("已创建 %1，但界面没能读回结果：%2")
-                                  .arg(dialog.directory(), error));
+            showWarning(QStringLiteral("新建镜像包"),
+                        QStringLiteral("已创建 %1，但界面没能读回结果：%2").arg(dialog.directory(), error));
             return;
         }
         applyDocument(view);
@@ -263,9 +316,42 @@ void MainWindow::newPackage() {
     }
 }
 
+void MainWindow::openPackage() {
+    bool discardUnsaved = false;
+    if (!confirmReplace(QStringLiteral("打开镜像包"),
+                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并打开另一个吗？"),
+                        &discardUnsaved)) {
+        return;
+    }
+
+    const QString start =
+        m_packageRoot.isEmpty() ? QDir::homePath() : QFileInfo(m_packageRoot).absolutePath();
+    const QString directory = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("打开镜像包"), start,
+        QFileDialog::DontUseNativeDialog | QFileDialog::ShowDirsOnly);
+    if (directory.isEmpty()) {
+        return;
+    }
+
+    QString viewJson;
+    QString error;
+    if (!EtSession::openPackage(directory, discardUnsaved, &viewJson, &error)) {
+        showWarning(QStringLiteral("打开镜像包"), error);
+        return;
+    }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("打开镜像包"),
+                    QStringLiteral("已打开 %1，但界面没能读回结果：%2").arg(directory, error));
+        return;
+    }
+    applyDocument(view);
+}
+
 void MainWindow::applyDocument(const DocumentView &view) {
     m_hasDocument = true;
     m_dirty = view.dirty;
+    m_packageRoot = view.root;
     m_closedSummary->setVisible(false);
     m_openSummary->setVisible(true);
     m_nameValue->setText(view.name);
@@ -280,8 +366,33 @@ void MainWindow::applyDocument(const DocumentView &view) {
     m_stateValue->setText(state);
     setWindowTitle(view.dirty ? QStringLiteral("%1* — et").arg(view.name)
                               : QStringLiteral("%1 — et").arg(view.name));
-    m_partitionList->clearPartitions();
+
+    QVector<PartitionRow> rows;
+    rows.reserve(view.partitions.size());
+    for (const PartitionView &partition : view.partitions) {
+        PartitionRow row;
+        row.id = partition.id;
+        row.name = partition.name;
+        row.startSector = sectorCountText(partition.startBytes, view.sectorSize);
+        row.sectorCount = sectorCountText(partition.sizeBytes, view.sectorSize);
+        row.capacity = formatBytes(partition.sizeBytes);
+        row.utilization = utilizationText(partition);
+        rows.append(row);
+    }
+    m_partitionList->setPartitions(rows);
     m_partitionEditor->setSelectionAvailable(false);
+
+    m_issueList->blockSignals(true);
+    m_issueList->clear();
+    for (const IssueView &issue : view.issues) {
+        auto *item = new QListWidgetItem(issue.message, m_issueList);
+        if (issue.hasPartitionId) {
+            item->setData(Qt::UserRole, issue.partitionId);
+        }
+    }
+    m_issueList->blockSignals(false);
+    m_issueList->setVisible(!view.issues.isEmpty());
+
     statusBar()->showMessage(view.root);
     updateActionStates();
 }

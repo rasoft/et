@@ -2,12 +2,15 @@
 //!
 //! 打开包时只做存在性和长度检查，不把镜像内容读进内存。
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::layout::MAX_PARTITIONS;
 use crate::manifest::{Manifest, Metadata};
+use crate::validate::{inspect_relative, InsidePath, InspectError};
 
 #[derive(Debug)]
 pub struct CreatedPackage {
@@ -38,6 +41,76 @@ pub fn create_package(dir: &Path, metadata: Metadata) -> Result<CreatedPackage, 
     write_manifest_atomic(&root, &bytes)?;
     cleanup.disarm();
     Ok(CreatedPackage { root, manifest })
+}
+
+#[derive(Debug)]
+pub struct OpenedPackage {
+    pub root: PathBuf,
+    pub manifest: Manifest,
+}
+
+/// 打开已有包。只读 manifest，并拒绝空 id、重复 id 和超过 128 条分区。
+/// 镜像是否越出包目录由随后的校验决定，这里不读取镜像内容。
+pub fn open_package(dir: &Path) -> Result<OpenedPackage, Error> {
+    if dir.as_os_str().is_empty() {
+        return Err(Error::new("没有指定目录"));
+    }
+    let root = resolve_existing_dir(dir)?;
+    if root.to_str().is_none() {
+        return Err(Error::new("路径不是合法的 UTF-8"));
+    }
+    let bytes = read_manifest(&root)?;
+    let manifest = Manifest::from_slice(&bytes)?;
+    if manifest.partitions.len() > MAX_PARTITIONS {
+        return Err(Error::new("分区不能超过 128 条"));
+    }
+    let mut seen = HashSet::new();
+    for partition in &manifest.partitions {
+        if partition.id.is_empty() {
+            return Err(Error::new("分区 id 为空"));
+        }
+        if !seen.insert(partition.id.clone()) {
+            return Err(Error::new(format!("分区 id 重复：{}", partition.id)));
+        }
+    }
+    Ok(OpenedPackage { root, manifest })
+}
+
+fn resolve_existing_dir(dir: &Path) -> Result<PathBuf, Error> {
+    match fs::symlink_metadata(dir) {
+        Err(err) if err.kind() == ErrorKind::NotFound => Err(Error::new("目录不存在")),
+        Err(err) => Err(Error::new(format!(
+            "无法检查目录（{}）：{err}",
+            dir.display()
+        ))),
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+            let root = dir.canonicalize().map_err(|err| {
+                if err.kind() == ErrorKind::NotFound {
+                    Error::new("目录不存在")
+                } else {
+                    Error::new(format!("无法解析目录（{}）：{err}", dir.display()))
+                }
+            })?;
+            if root.is_dir() {
+                Ok(root)
+            } else {
+                Err(Error::new("目标路径不是目录"))
+            }
+        }
+        Ok(_) => Err(Error::new("目标路径不是目录")),
+    }
+}
+
+fn read_manifest(root: &Path) -> Result<Vec<u8>, Error> {
+    match inspect_relative(root, "manifest.json") {
+        Ok(InsidePath::File { path, .. }) => {
+            fs::read(path).map_err(|err| Error::new(format!("无法读取 manifest.json：{err}")))
+        }
+        Ok(InsidePath::Missing) => Err(Error::new("找不到 manifest.json")),
+        Ok(InsidePath::NotFile) => Err(Error::new("manifest.json 不是常规文件")),
+        Err(InspectError::Escape) => Err(Error::new("manifest.json 越出包目录")),
+        Err(InspectError::Failed(message)) => Err(Error::new(message)),
+    }
 }
 
 fn resolve_package_dir(dir: &Path) -> Result<PathBuf, Error> {
@@ -289,5 +362,81 @@ mod tests {
             create_package(&link, Metadata::try_new("link", 68 * 512, 512).unwrap()).unwrap_err();
         assert!(err.message().contains("符号链接"));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn opens_a_created_package_and_rejects_a_missing_manifest() {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("board.etpk");
+        create_package(
+            &dir,
+            Metadata::try_new("board", 16 * 1024 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        let opened = super::open_package(&dir).unwrap();
+        assert_eq!(opened.manifest.metadata.name, "board");
+        assert!(opened.root.ends_with("board.etpk"));
+
+        let empty = tmp.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert!(super::open_package(&empty)
+            .unwrap_err()
+            .message()
+            .contains("找不到 manifest.json"));
+
+        let file_path = tmp.path().join("not-dir");
+        fs::write(&file_path, b"x").unwrap();
+        assert!(super::open_package(&file_path)
+            .unwrap_err()
+            .message()
+            .contains("不是目录"));
+
+        let missing = tmp.path().join("missing.etpk");
+        assert_eq!(
+            super::open_package(&missing).unwrap_err().message(),
+            "目录不存在"
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_partitions_and_duplicate_ids() {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("wide.etpk");
+        fs::create_dir_all(dir.join("images")).unwrap();
+        let mut manifest =
+            Manifest::new(Metadata::try_new("wide", 16 * 1024 * 1024 * 1024, 512).unwrap());
+        for index in 0..129 {
+            manifest.partitions.push(crate::manifest::Partition {
+                id: format!("00000000-0000-4000-8000-{index:012}"),
+                name: format!("p{index}"),
+                size_bytes: 512,
+                start_bytes: None,
+                partition_type: "linux-filesystem".to_string(),
+                attributes: 0,
+                image: None,
+                extra: serde_json::Map::new(),
+            });
+        }
+        fs::write(dir.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        assert!(super::open_package(&dir)
+            .unwrap_err()
+            .message()
+            .contains("128"));
+
+        manifest.partitions.truncate(2);
+        manifest.partitions[1].id = manifest.partitions[0].id.clone();
+        fs::write(dir.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        assert!(super::open_package(&dir)
+            .unwrap_err()
+            .message()
+            .contains("分区 id 重复"));
+
+        manifest.partitions.truncate(1);
+        manifest.partitions[0].id.clear();
+        fs::write(dir.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            super::open_package(&dir).unwrap_err().message(),
+            "分区 id 为空"
+        );
     }
 }

@@ -32,7 +32,6 @@ pub struct ViewMetadata {
     pub alignment: u64,
 }
 
-/// 分区行在增加分区时填入。新建的空包没有分区。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewPartition {
@@ -44,9 +43,10 @@ pub struct ViewPartition {
     pub start_fixed: bool,
     pub size_bytes: u64,
     pub image: Option<String>,
+    pub image_bytes: Option<u64>,
 }
 
-/// 校验项在布局校验接入后填入。
+/// 校验项。打开含错误的包仍然成功，路径越出包目录则整次打开失败。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewIssue {
@@ -96,6 +96,22 @@ impl Session {
         self.view()
     }
 
+    pub fn open_package(
+        &mut self,
+        dir: &Path,
+        discard_unsaved: bool,
+    ) -> Result<DocumentView, Error> {
+        if self.dirty && !discard_unsaved {
+            return Err(Error::new("有未保存的修改"));
+        }
+        let opened = disk::open_package(dir)?;
+        let view = document_view(&opened.root, &opened.manifest, false)?;
+        self.root = Some(opened.root);
+        self.manifest = Some(opened.manifest);
+        self.dirty = false;
+        Ok(view)
+    }
+
     fn view(&self) -> Result<DocumentView, Error> {
         let root = self
             .root
@@ -120,10 +136,47 @@ fn document_view(
     manifest: &et_core::manifest::Manifest,
     dirty: bool,
 ) -> Result<DocumentView, Error> {
+    let report = et_core::validate::check(root, manifest)?;
+    let placed = et_core::validate::placed_partitions(manifest);
     let root = root
         .to_str()
         .ok_or_else(|| Error::new("路径不是合法的 UTF-8"))?
         .to_string();
+    let partitions = manifest
+        .partitions
+        .iter()
+        .enumerate()
+        .map(|(index, partition)| ViewPartition {
+            id: partition.id.clone(),
+            name: partition.name.clone(),
+            partition_type: partition.partition_type.clone(),
+            start_bytes: placed
+                .get(index)
+                .and_then(|place| place.start_bytes)
+                .unwrap_or(0),
+            start_fixed: placed
+                .get(index)
+                .map(|place| place.start_fixed)
+                .unwrap_or(false),
+            size_bytes: partition.size_bytes,
+            image: partition.image.clone(),
+            image_bytes: report.image_lengths.get(index).copied().unwrap_or(None),
+        })
+        .collect();
+    let issues = report
+        .issues
+        .iter()
+        .map(|issue| ViewIssue {
+            severity: "error".to_string(),
+            partition_id: issue.partition_index.and_then(|index| {
+                manifest
+                    .partitions
+                    .get(index)
+                    .map(|partition| partition.id.clone())
+            }),
+            message: issue.message.clone(),
+        })
+        .collect();
     Ok(DocumentView {
         root,
         dirty,
@@ -136,8 +189,8 @@ fn document_view(
             user_area_bytes: manifest.metadata.user_area_bytes,
             alignment: manifest.metadata.alignment,
         },
-        partitions: Vec::new(),
-        issues: Vec::new(),
+        partitions,
+        issues,
     })
 }
 
@@ -256,5 +309,58 @@ mod tests {
         assert_eq!(err.message(), "名称为空");
         assert!(!second.exists());
         assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+    }
+
+    #[test]
+    fn open_package_reports_layout_and_keeps_the_previous_document_on_failure() {
+        let tmp = TempDir::new();
+        let first = tmp.path().join("first.etpk");
+        let second = tmp.path().join("second.etpk");
+        let mut session = Session::new();
+        session
+            .create_package(&first, "first", GIB16, 512, false)
+            .unwrap();
+
+        fs::create_dir_all(second.join("images")).unwrap();
+        let mut manifest = et_core::manifest::Manifest::new(
+            et_core::manifest::Metadata::try_new("second", GIB16, 512).unwrap(),
+        );
+        manifest.partitions.push(et_core::manifest::Partition {
+            id: "6f1c2a0e-7b4d-4e3a-9c1f-2a8b0d5e6f70".to_string(),
+            name: "boot".to_string(),
+            size_bytes: 64 * 1024 * 1024,
+            start_bytes: None,
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: Some("../secret.img".to_string()),
+            extra: serde_json::Map::new(),
+        });
+        fs::write(second.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+
+        let err = session.open_package(&second, false).unwrap_err();
+        assert!(err.message().contains("越出包目录"));
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+
+        manifest.partitions[0].image =
+            Some("images/6f1c2a0e-7b4d-4e3a-9c1f-2a8b0d5e6f70.img".to_string());
+        fs::write(second.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        session.dirty = true;
+        let err = session.open_package(&second, false).unwrap_err();
+        assert_eq!(err.message(), "有未保存的修改");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+
+        let view = session.open_package(&second, true).unwrap();
+        assert_eq!(view.metadata.name, "second");
+        assert!(!view.dirty);
+        assert_eq!(view.partitions.len(), 1);
+        assert_eq!(view.partitions[0].name, "boot");
+        assert_eq!(view.partitions[0].start_bytes, 1024 * 1024);
+        assert!(!view.partitions[0].start_fixed);
+        assert!(view.partitions[0].image_bytes.is_none());
+        assert!(view
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("不存在")));
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "second");
     }
 }

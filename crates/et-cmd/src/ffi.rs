@@ -79,6 +79,38 @@ pub extern "C" fn et_create_package(
     }
 }
 
+/// 打开已有包并作为当前文档。失败时不替换当前会话。
+#[no_mangle]
+pub extern "C" fn et_open_package(
+    dir_utf8: *const c_char,
+    discard_unsaved: i32,
+    out_view: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_view.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_view = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let dir = c_str(dir_utf8, "目录")?;
+        let view =
+            with_session(|session| session.open_package(Path::new(dir), discard_unsaved != 0))?;
+        view.to_json()
+    })();
+
+    match result {
+        Ok(json) => write_out(out_view, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
 fn with_session<T>(f: impl FnOnce(&mut Session) -> T) -> T {
     let mut session = SESSION
         .lock()
@@ -107,7 +139,7 @@ fn write_out(slot: *mut *mut c_char, text: String) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{et_abi_version, et_create_package, et_string_free, et_version};
+    use super::{et_abi_version, et_create_package, et_open_package, et_string_free, et_version};
     use std::ffi::{CStr, CString};
     use std::fs;
     use std::path::PathBuf;
@@ -216,5 +248,24 @@ mod tests {
         et_string_free(view);
         assert!(package.join("manifest.json").is_file());
         assert!(package.join("images").is_dir());
+
+        view = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        assert_eq!(
+            et_open_package(
+                package_c.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            1
+        );
+        let rc = et_open_package(package_c.as_ptr(), 0, &mut view, &mut error);
+        assert_eq!(rc, 0);
+        assert!(error.is_null());
+        let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
+        assert!(view_text.contains("\"name\":\"board-d1\""));
+        assert!(view_text.contains("\"partitions\":[]"));
+        et_string_free(view);
     }
 }
