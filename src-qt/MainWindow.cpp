@@ -1,7 +1,6 @@
 #include "MainWindow.h"
 
 #include "EtSession.h"
-#include "ImportPackageDialog.h"
 #include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
@@ -94,7 +93,7 @@ void MainWindow::createActions() {
     m_openPackage->setStatusTip(QStringLiteral("打开镜像包"));
 
     m_importPackage = new QAction(QStringLiteral("导入..."), this);
-    m_importPackage->setStatusTip(QStringLiteral("导入 flash.conf 或 download.bin"));
+    m_importPackage->setStatusTip(QStringLiteral("把 flash.conf 或 download.bin 导入当前镜像包"));
 
     m_savePackage = new QAction(QStringLiteral("保存"), this);
     m_savePackage->setShortcut(QKeySequence::Save);
@@ -254,6 +253,7 @@ void MainWindow::createStatusBar() {
 void MainWindow::updateActionStates() {
     const bool hasSelection = m_partitionList != nullptr && m_partitionList->hasSelection();
     m_savePackage->setEnabled(m_hasDocument);
+    m_importPackage->setEnabled(m_hasDocument);
     m_newPartition->setEnabled(m_hasDocument);
     m_deletePartition->setEnabled(m_hasDocument && hasSelection);
     m_download->setEnabled(m_hasDocument);
@@ -408,38 +408,55 @@ void MainWindow::applyDocument(const DocumentView &view) {
 }
 
 void MainWindow::importPackage() {
-    bool discardUnsaved = false;
-    if (!confirmReplace(QStringLiteral("导入"),
-                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并导入吗？"),
-                        &discardUnsaved)) {
+    if (!m_hasDocument) {
+        showWarning(QStringLiteral("导入"), QStringLiteral("请先新建或打开镜像包"));
         return;
+    }
+
+    const bool hasPartitions =
+        m_partitionList->model() != nullptr && m_partitionList->model()->rowCount() > 0;
+    if (m_dirty || hasPartitions) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Question);
+        box.setWindowTitle(QStringLiteral("导入"));
+        box.setText(m_dirty ? QStringLiteral("当前镜像包有未保存的修改。导入会丢掉这些修改，并替换其中的"
+                                             "分区和镜像。要继续吗？")
+                            : QStringLiteral("导入会替换当前镜像包中的分区和镜像。要继续吗？"));
+        auto *accept = box.addButton(QStringLiteral("导入"), QMessageBox::AcceptRole);
+        auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
+        box.exec();
+        if (box.clickedButton() != accept) {
+            return;
+        }
     }
 
     const QString start =
         m_packageRoot.isEmpty() ? QDir::homePath() : QFileInfo(m_packageRoot).absolutePath();
-    const QString source = ImportPackageDialog::pickSourceFile(this, start);
+    const QString source = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入"), start,
+        QStringLiteral("可导入的文件 (*.conf *.config *.bin);;"
+                       "flash.conf (*.conf *.config);;"
+                       "download.bin (*.bin);;"
+                       "所有文件 (*)"),
+        nullptr, QFileDialog::DontUseNativeDialog);
     if (source.isEmpty()) {
         return;
     }
 
-    ImportPackageDialog dialog(source, this);
-    while (dialog.exec() == QDialog::Accepted) {
-        QString viewJson;
-        QString error;
-        if (!EtSession::importPackage(dialog.sourceFile(), dialog.directory(), dialog.packageName(),
-                                      discardUnsaved, &viewJson, &error)) {
-            showWarning(QStringLiteral("导入"), error);
-            continue;
-        }
-        DocumentView view;
-        if (!DocumentView::parse(viewJson, &view, &error)) {
-            showWarning(QStringLiteral("导入"),
-                        QStringLiteral("已导入 %1，但界面没能读回结果：%2").arg(dialog.directory(), error));
-            return;
-        }
-        applyDocument(view);
+    QString viewJson;
+    QString error;
+    if (!EtSession::importPackage(source, &viewJson, &error)) {
+        showWarning(QStringLiteral("导入"), error);
         return;
     }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("导入"),
+                    QStringLiteral("已写入当前镜像包，但界面没能读回结果：%1").arg(error));
+        return;
+    }
+    applyDocument(view);
 }
 
 void MainWindow::savePackage() {

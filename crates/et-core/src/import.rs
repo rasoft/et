@@ -1,5 +1,6 @@
-//! 把 flash.conf 或 genflash merge 的 download.bin 写成一个 `.etpk` 包。
+//! 把 flash.conf 或 genflash merge 的 download.bin 写入已经打开的 `.etpk`。
 //!
+//! 包目录、名称和说明保持不变，分区和镜像按导入内容替换。
 //! `table_type` 为 gpt 时，配置里的地址、大小和 `flash_size` 以 `block_size` 为单位，
 //! 这里乘成字节。其他表类型按字节解释。分区起点按配置里的地址固定，不重新自动排布。
 //! 最后一条分区的大小可以是 `auto`。包里不写 eMMC 容量，下载时再按开发板的真实容量占满剩余空间。
@@ -17,17 +18,21 @@ use crate::disk::{self, ImageSpan};
 use crate::error::Error;
 use crate::flash_conf::{self, FlashConfig, FlashPartition, FlashSize, MAX_TEXT_BYTES};
 use crate::layout::MAX_PARTITIONS;
-use crate::manifest::{Metadata, Partition};
+use crate::manifest::{Manifest, Metadata, Partition};
 use crate::merge_bin::{self, MergeSubfile};
-use crate::validate::partition_name_issue;
+use crate::validate::{inspect_relative, partition_name_issue, InsidePath};
 
-pub fn import_package(
+/// 把源文件里的分区和镜像写入 `root` 上已经打开的包。
+///
+/// 先完整解析，再复制新镜像。manifest 写成功之后才删除被替换掉的旧镜像。
+/// 中途失败时，原来的 manifest 和镜像都还在。
+pub fn import_into_package(
     source: &Path,
-    dir: &Path,
-    name: &str,
-) -> Result<disk::CreatedPackage, Error> {
+    root: &Path,
+    manifest: &Manifest,
+) -> Result<Manifest, Error> {
     let plan = plan(source)?;
-    write_package(source, dir, name, plan)
+    apply_plan(root, manifest, plan)
 }
 
 struct Plan {
@@ -405,35 +410,30 @@ fn partition_extra(part: &FlashPartition) -> Map<String, Value> {
     extra
 }
 
-fn write_package(
-    source: &Path,
-    dir: &Path,
-    name: &str,
-    plan: Plan,
-) -> Result<disk::CreatedPackage, Error> {
-    let remove_root = !path_exists(dir)?;
-    let mut metadata = match plan.user_area_bytes {
-        Some(bytes) => Metadata::try_new(name, bytes, plan.sector_size)?,
-        None => Metadata::without_capacity(name, plan.sector_size)?,
-    };
-    metadata.description = imported_description(source);
-    fill_metadata(&mut metadata, &plan);
-    metadata.validate()?;
-    let mut created = disk::create_package(dir, metadata)?;
-    let mut cleanup = ImportCleanup {
-        root: created.root.clone(),
-        remove_root,
+fn apply_plan(root: &Path, current: &Manifest, plan: Plan) -> Result<Manifest, Error> {
+    let mut next = current.clone();
+    next.metadata.sector_size = plan.sector_size;
+    next.metadata.user_area_bytes = plan.user_area_bytes;
+    clear_vendor_keys(&mut next.metadata);
+    fill_metadata(&mut next.metadata, &plan);
+    next.metadata.validate()?;
+    next.partitions.clear();
+
+    let mut installed = InstalledImages {
+        root: root.to_path_buf(),
+        ids: Vec::new(),
         armed: true,
     };
     for planned in plan.partitions {
         let id = new_partition_id();
         let image = if let Some(spans) = planned.image {
-            disk::install_image(&created.root, &id, &spans)?;
+            disk::install_image(root, &id, &spans)?;
+            installed.ids.push(id.clone());
             Some(format!("images/{id}.img"))
         } else {
             None
         };
-        created.manifest.partitions.push(Partition {
+        next.partitions.push(Partition {
             id,
             name: planned.name,
             size_bytes: planned.size_bytes,
@@ -444,9 +444,23 @@ fn write_package(
             extra: planned.extra,
         });
     }
-    disk::save_manifest(&created.root, &created.manifest)?;
-    cleanup.disarm();
-    Ok(created)
+    disk::save_manifest(root, &next)?;
+    installed.disarm();
+    remove_replaced_images(root, &current.partitions, &next.partitions);
+    Ok(next)
+}
+
+fn clear_vendor_keys(metadata: &mut Metadata) {
+    for key in [
+        "flashType",
+        "tableType",
+        "tableVersion",
+        "crc32",
+        "writeProtect",
+        "dtbFile",
+    ] {
+        metadata.extra.remove(key);
+    }
 }
 
 fn fill_metadata(metadata: &mut Metadata, plan: &Plan) {
@@ -484,30 +498,6 @@ fn fill_metadata(metadata: &mut Metadata, plan: &Plan) {
     }
 }
 
-fn imported_description(source: &Path) -> String {
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("文件");
-    let text = format!("导入自 {name}");
-    if text.chars().count() <= 4096 {
-        text
-    } else {
-        text.chars().take(4096).collect()
-    }
-}
-
-fn path_exists(path: &Path) -> Result<bool, Error> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(Error::new(format!(
-            "无法检查目录（{}）：{err}",
-            path.display()
-        ))),
-    }
-}
-
 fn new_partition_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
@@ -524,28 +514,45 @@ fn new_partition_id() -> String {
     format!("{a:08x}-{b:04x}-4{c:03x}-{d:04x}-{e:012x}")
 }
 
-struct ImportCleanup {
+struct InstalledImages {
     root: PathBuf,
-    remove_root: bool,
+    ids: Vec<String>,
     armed: bool,
 }
 
-impl ImportCleanup {
+impl InstalledImages {
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for ImportCleanup {
+impl Drop for InstalledImages {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
-        let _ = fs::remove_dir_all(self.root.join("images"));
-        let _ = fs::remove_file(self.root.join("manifest.json"));
-        let _ = fs::remove_file(self.root.join("manifest.json.tmp"));
-        if self.remove_root {
-            let _ = fs::remove_dir(&self.root);
+        for id in &self.ids {
+            let images = self.root.join("images");
+            let _ = fs::remove_file(images.join(format!("{id}.img")));
+            let _ = fs::remove_file(images.join(format!("{id}.img.partial")));
+        }
+    }
+}
+
+fn remove_replaced_images(root: &Path, old: &[Partition], new: &[Partition]) {
+    let keep: HashSet<&str> = new
+        .iter()
+        .filter_map(|partition| partition.image.as_deref())
+        .collect();
+    for partition in old {
+        let Some(image) = partition.image.as_deref() else {
+            continue;
+        };
+        if keep.contains(image) {
+            continue;
+        }
+        if let Ok(InsidePath::File { path, .. }) = inspect_relative(root, image) {
+            let _ = fs::remove_file(path);
         }
     }
 }
@@ -557,8 +564,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::import_package;
-    use crate::disk::open_package;
+    use super::import_into_package;
+    use crate::disk::{create_package, open_package};
+    use crate::manifest::{Metadata, Partition};
 
     struct TempDir(PathBuf);
 
@@ -579,6 +587,27 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Imported {
+        root: PathBuf,
+        manifest: crate::manifest::Manifest,
+    }
+
+    fn import_into(parent: &Path, source: &Path, name: &str) -> Imported {
+        let root = parent.join(format!("{name}.etpk"));
+        let created = create_package(
+            &root,
+            Metadata::try_new(name, 32 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        let mut current = created.manifest;
+        current.metadata.description = "keep".to_string();
+        let manifest = import_into_package(source, &created.root, &current).unwrap();
+        Imported {
+            root: created.root,
+            manifest,
         }
     }
 
@@ -635,14 +664,14 @@ frp NULL false RAW rw 0 0 0x840800 0x800
 ",
         )
         .unwrap();
-        let dest = tmp.0.join("board.etpk");
-        let created = import_package(&conf, &dest, "board").unwrap();
+        let created = import_into(&tmp.0, &conf, "board");
+        assert_eq!(created.manifest.metadata.name, "board");
+        assert_eq!(created.manifest.metadata.description, "keep");
         assert_eq!(created.manifest.metadata.sector_size, 512);
         assert_eq!(
             created.manifest.metadata.user_area_bytes,
             Some(0x900000 * 512)
         );
-        assert_eq!(created.manifest.metadata.description, "导入自 flash.conf");
         assert_eq!(created.manifest.partitions.len(), 2);
 
         let super_part = &created.manifest.partitions[0];
@@ -673,8 +702,9 @@ frp NULL false RAW rw 0 0 0x840800 0x800
         assert_eq!(frp.size_bytes, Some(0x800 * 512));
         assert!(frp.image.is_none());
 
-        let opened = open_package(&dest).unwrap();
+        let opened = open_package(&created.root).unwrap();
         assert_eq!(opened.manifest.partitions[0].name, "super");
+        assert_eq!(opened.manifest.metadata.name, "board");
     }
 
     #[test]
@@ -694,7 +724,7 @@ tail NULL true RAW ro 0 0 0x200000 0x1000
 ",
         )
         .unwrap();
-        let created = import_package(&conf, &tmp.0.join("raw.etpk"), "raw").unwrap();
+        let created = import_into(&tmp.0, &conf, "raw");
         assert_eq!(created.manifest.metadata.user_area_bytes, Some(0x2000000));
         assert_eq!(created.manifest.partitions[0].start_bytes, Some(0x100000));
         assert_eq!(created.manifest.partitions[0].size_bytes, Some(512));
@@ -730,7 +760,7 @@ KERNEL kernel.bin true RAW ro 1 0 0x800 0x400
 ",
         )
         .unwrap();
-        let created = import_package(&conf, &tmp.0.join("kern.etpk"), "kern").unwrap();
+        let created = import_into(&tmp.0, &conf, "kern");
         let image = created.manifest.partitions[0].image.as_deref().unwrap();
         assert_eq!(fs::read(created.root.join(image)).unwrap(), [1, 2, 3, 4, 5]);
 
@@ -741,10 +771,11 @@ KERNEL kernel.bin true RAW ro 1 0 0x800 0x400
             &[("flash.conf", text.as_bytes()), ("kernel.bin", b"PACKED")],
             Some(b"boot"),
         );
-        let merged = import_package(&bin, &tmp.0.join("merged.etpk"), "merged").unwrap();
+        let merged = import_into(&tmp.0, &bin, "merged");
         let image = merged.manifest.partitions[0].image.as_deref().unwrap();
         assert_eq!(fs::read(merged.root.join(image)).unwrap(), b"PACKED");
-        assert_eq!(merged.manifest.metadata.description, "导入自 download.bin");
+        assert_eq!(merged.manifest.metadata.name, "merged");
+        assert_eq!(merged.manifest.metadata.description, "keep");
     }
 
     #[test]
@@ -768,7 +799,7 @@ b boot.img true RAW ro 0 0 0x900 0x100
             ],
             None,
         );
-        let created = import_package(&bin, &tmp.0.join("dup.etpk"), "dup").unwrap();
+        let created = import_into(&tmp.0, &bin, "dup");
         let first = created.manifest.partitions[0].image.as_deref().unwrap();
         let second = created.manifest.partitions[1].image.as_deref().unwrap();
         assert_eq!(fs::read(created.root.join(first)).unwrap(), b"first");
@@ -785,16 +816,27 @@ b boot.img true RAW ro 0 0 0x900 0x100
         )
         .unwrap();
         let dest = tmp.0.join("missing.etpk");
-        let err = import_package(&conf, &dest, "missing").unwrap_err();
+        let created_empty = create_package(
+            &dest,
+            Metadata::try_new("missing", 32 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        let err = import_into_package(&conf, &dest, &created_empty.manifest).unwrap_err();
         assert!(err.message().contains("找不到"));
-        assert!(!dest.exists());
+        let opened = open_package(&dest).unwrap();
+        assert_eq!(opened.manifest.metadata.name, "missing");
+        assert!(opened.manifest.partitions.is_empty());
 
         fs::write(
             &conf,
             "block_size 512\ntable_type gpt\nboot NULL true RAW ro 0 0 0x800 0x100\ndata NULL true RAW ro 0 0 0x900 auto\n",
         )
         .unwrap();
-        let created = import_package(&conf, &dest, "auto").unwrap();
+        let manifest = import_into_package(&conf, &dest, &opened.manifest).unwrap();
+        let created = Imported {
+            root: dest.clone(),
+            manifest,
+        };
         assert_eq!(created.manifest.metadata.user_area_bytes, None);
         assert_eq!(created.manifest.partitions[0].size_bytes, Some(0x100 * 512));
         assert_eq!(created.manifest.partitions[1].name, "data");
@@ -821,7 +863,7 @@ b boot.img true RAW ro 0 0 0x900 0x100
             "block_size 0x200\ntable_type gpt\nflash_size 0x10000\ndata NULL true RAW rw 0 0 0x800 auto\n",
         )
         .unwrap();
-        let created = import_package(&conf, &tmp.0.join("auto.etpk"), "auto").unwrap();
+        let created = import_into(&tmp.0, &conf, "auto");
         let part = &created.manifest.partitions[0];
         assert_eq!(created.manifest.metadata.user_area_bytes, None);
         assert_eq!(part.start_bytes, Some(0x800 * 512));
@@ -834,5 +876,58 @@ b boot.img true RAW ro 0 0 0x900 0x100
             part.extra.get("mode").and_then(serde_json::Value::as_str),
             Some("rw")
         );
+    }
+
+    #[test]
+    fn import_replaces_partitions_and_keeps_the_open_package() {
+        let tmp = TempDir::new();
+        let root = tmp.0.join("board.etpk");
+        let mut created = create_package(
+            &root,
+            Metadata::try_new("board", 32 * 1024 * 1024, 512).unwrap(),
+        )
+        .unwrap();
+        created.manifest.metadata.description = "保留说明".to_string();
+        let old_id = "11111111-2222-4333-8444-555555555555";
+        let old_image = format!("images/{old_id}.img");
+        fs::write(root.join(&old_image), b"OLD").unwrap();
+        created.manifest.partitions.push(Partition {
+            id: old_id.to_string(),
+            name: "old".to_string(),
+            size_bytes: Some(512),
+            start_bytes: Some(1024 * 1024),
+            partition_type: "linux-filesystem".to_string(),
+            attributes: 0,
+            image: Some(old_image.clone()),
+            extra: serde_json::Map::new(),
+        });
+        crate::disk::save_manifest(&root, &created.manifest).unwrap();
+
+        let bad = tmp.0.join("bad.conf");
+        fs::write(&bad, b"not a conf").unwrap();
+        let err = import_into_package(&bad, &root, &created.manifest).unwrap_err();
+        assert!(err.message().contains("9 列") || err.message().contains("无法识别"));
+        assert_eq!(fs::read(root.join(&old_image)).unwrap(), b"OLD");
+        assert_eq!(
+            open_package(&root).unwrap().manifest.partitions[0].name,
+            "old"
+        );
+
+        fs::write(tmp.0.join("boot.img"), b"NEW").unwrap();
+        let conf = tmp.0.join("flash.conf");
+        fs::write(
+            &conf,
+            "block_size 512\ntable_type gpt\nflash_size 0x10000\nboot boot.img true RAW ro 0 0 0x800 0x100\n",
+        )
+        .unwrap();
+        let manifest = import_into_package(&conf, &root, &created.manifest).unwrap();
+        assert_eq!(manifest.metadata.name, "board");
+        assert_eq!(manifest.metadata.description, "保留说明");
+        assert_eq!(manifest.partitions.len(), 1);
+        assert_eq!(manifest.partitions[0].name, "boot");
+        assert!(!root.join(&old_image).exists());
+        let image = manifest.partitions[0].image.as_deref().unwrap();
+        assert_eq!(fs::read(root.join(image)).unwrap(), b"NEW");
+        assert_eq!(open_package(&root).unwrap().manifest.metadata.name, "board");
     }
 }

@@ -112,22 +112,21 @@ impl Session {
         Ok(view)
     }
 
-    pub fn import_package(
-        &mut self,
-        source: &Path,
-        dir: &Path,
-        name: &str,
-        discard_unsaved: bool,
-    ) -> Result<DocumentView, Error> {
-        if self.dirty && !discard_unsaved {
-            return Err(Error::new("有未保存的修改"));
-        }
-        let created = et_core::import::import_package(source, dir, name)?;
-        let view = document_view(&created.root, &created.manifest, false)?;
-        self.root = Some(created.root);
-        self.manifest = Some(created.manifest);
+    /// 把 flash.conf 或 download.bin 写入当前打开的包。目录和名称不变。
+    /// 没有打开的包时失败，失败时不改会话。
+    pub fn import_package(&mut self, source: &Path) -> Result<DocumentView, Error> {
+        let root = self
+            .root
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let current = self
+            .manifest
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let manifest = et_core::import::import_into_package(source, &root, &current)?;
+        self.manifest = Some(manifest);
         self.dirty = false;
-        Ok(view)
+        self.view()
     }
 
     fn view(&self) -> Result<DocumentView, Error> {
@@ -383,13 +382,20 @@ mod tests {
     }
 
     #[test]
-    fn import_package_replaces_the_document_and_keeps_it_when_import_fails() {
+    fn import_package_writes_the_open_package_and_keeps_it_when_import_fails() {
         let tmp = TempDir::new();
+        let mut closed = Session::new();
+        let err = closed
+            .import_package(&tmp.path().join("flash.conf"))
+            .unwrap_err();
+        assert_eq!(err.message(), "没有打开的包");
+
         let first = tmp.path().join("first.etpk");
         let mut session = Session::new();
-        session
+        let created = session
             .create_package(&first, "first", GIB16, 512, false)
             .unwrap();
+        let root = created.root.clone();
         session.dirty = true;
 
         let conf = tmp.path().join("flash.conf");
@@ -405,19 +411,10 @@ boot boot.img true RAW ro 1 7 0x800 0x400
 ",
         )
         .unwrap();
-        let imported = tmp.path().join("imported.etpk");
-        let err = session
-            .import_package(&conf, &imported, "imported", false)
-            .unwrap_err();
-        assert_eq!(err.message(), "有未保存的修改");
-        assert!(!imported.exists());
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
-
-        let view = session
-            .import_package(&conf, &imported, "imported", true)
-            .unwrap();
+        let view = session.import_package(&conf).unwrap();
         assert!(!view.dirty);
-        assert_eq!(view.metadata.name, "imported");
+        assert_eq!(view.root, root);
+        assert_eq!(view.metadata.name, "first");
         assert_eq!(view.metadata.sector_size, 512);
         assert_eq!(view.partitions.len(), 1);
         assert_eq!(view.partitions[0].name, "boot");
@@ -426,15 +423,17 @@ boot boot.img true RAW ro 1 7 0x800 0x400
         assert_eq!(view.partitions[0].size_bytes, Some(0x400 * 512));
         assert_eq!(view.partitions[0].image_bytes, Some(10));
         assert!(view.issues.is_empty());
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "imported");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert!(!tmp.path().join("imported.etpk").exists());
 
         let missing = tmp.path().join("missing.conf");
         fs::write(&missing, b"not a conf").unwrap();
-        let err = session
-            .import_package(&missing, &tmp.path().join("nope.etpk"), "nope", false)
-            .unwrap_err();
+        let err = session.import_package(&missing).unwrap_err();
         assert!(err.message().contains("9 列") || err.message().contains("无法识别"));
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "imported");
-        assert!(!tmp.path().join("nope.etpk").exists());
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert_eq!(
+            session.manifest.as_ref().unwrap().partitions[0].name,
+            "boot"
+        );
     }
 }

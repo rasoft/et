@@ -247,20 +247,14 @@ bool EtSession::openPackage(const QString &directory, bool discardUnsaved, QStri
     return true;
 }
 
-bool EtSession::importPackage(const QString &sourceFile, const QString &directory,
-                              const QString &name, bool discardUnsaved, QString *viewJson,
-                              QString *error) {
+bool EtSession::importPackage(const QString &sourceFile, QString *viewJson, QString *error) {
     if (viewJson == nullptr || error == nullptr) {
         return false;
     }
     const QByteArray sourceBytes = sourceFile.toUtf8();
-    const QByteArray directoryBytes = directory.toUtf8();
-    const QByteArray nameBytes = name.toUtf8();
     char *view = nullptr;
     char *message = nullptr;
-    const int32_t rc =
-        et_import_package(sourceBytes.constData(), directoryBytes.constData(), nameBytes.constData(),
-                          discardUnsaved ? 1 : 0, &view, &message);
+    const int32_t rc = et_import_package(sourceBytes.constData(), &view, &message);
     const QString viewText = takeString(view);
     const QString errorText = takeString(message);
     if (rc != 0) {

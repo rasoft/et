@@ -111,13 +111,10 @@ pub extern "C" fn et_open_package(
     }
 }
 
-/// 导入 flash.conf 或 download.bin，并作为当前文档。失败时不替换当前会话。
+/// 把 flash.conf 或 download.bin 写入当前打开的包。失败时不改当前会话。
 #[no_mangle]
 pub extern "C" fn et_import_package(
     source_utf8: *const c_char,
-    dir_utf8: *const c_char,
-    name_utf8: *const c_char,
-    discard_unsaved: i32,
     out_view: *mut *mut c_char,
     out_error: *mut *mut c_char,
 ) -> i32 {
@@ -131,16 +128,7 @@ pub extern "C" fn et_import_package(
 
     let result = (|| {
         let source = c_str(source_utf8, "文件")?;
-        let dir = c_str(dir_utf8, "目录")?;
-        let name = c_str(name_utf8, "名称")?;
-        let view = with_session(|session| {
-            session.import_package(
-                Path::new(source),
-                Path::new(dir),
-                name,
-                discard_unsaved != 0,
-            )
-        })?;
+        let view = with_session(|session| session.import_package(Path::new(source)))?;
         view.to_json()
     })();
 
@@ -189,7 +177,14 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// 这些测试共用进程里的会话，必须串行，否则导入会写进另一个测试的包。
+    fn session_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn abi_version_starts_at_one() {
@@ -233,6 +228,7 @@ mod tests {
 
     #[test]
     fn create_package_ffi_returns_json_or_an_error_string() {
+        let _session = session_test_lock();
         let dir = CString::new("unused").unwrap();
         let name = CString::new("unused").unwrap();
         assert_eq!(
@@ -316,40 +312,39 @@ mod tests {
 
     #[test]
     fn import_package_ffi_returns_json_or_an_error_string() {
-        let dir = CString::new("unused").unwrap();
-        let name = CString::new("unused").unwrap();
+        let _session = session_test_lock();
         let source = CString::new("unused").unwrap();
         assert_eq!(
-            et_import_package(
-                source.as_ptr(),
-                dir.as_ptr(),
-                name.as_ptr(),
-                1,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ),
+            et_import_package(source.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(),),
             1
         );
 
         let tmp = TempDir::new();
-        let missing = tmp.0.join("missing.conf");
-        let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
-        let package = tmp.0.join("imported.etpk");
+        let package = tmp.0.join("kept.etpk");
         let package_c = CString::new(package.to_str().unwrap()).unwrap();
-        let package_name = CString::new("imported").unwrap();
+        let package_name = CString::new("kept").unwrap();
         let mut view = std::ptr::null_mut();
         let mut error = std::ptr::null_mut();
-        let rc = et_import_package(
-            missing_c.as_ptr(),
+        let rc = et_create_package(
             package_c.as_ptr(),
             package_name.as_ptr(),
+            16 * 1024 * 1024 * 1024,
+            512,
             1,
             &mut view,
             &mut error,
         );
+        assert_eq!(rc, 0);
+        et_string_free(view);
+
+        let missing = tmp.0.join("missing.conf");
+        let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
+        view = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let rc = et_import_package(missing_c.as_ptr(), &mut view, &mut error);
         assert_eq!(rc, 1);
         assert!(view.is_null());
-        assert!(!package.exists());
+        assert!(package.join("manifest.json").is_file());
         let error_text = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
         assert!(error_text.contains("文件不存在"));
         et_string_free(error);
@@ -364,14 +359,7 @@ mod tests {
         let conf_c = CString::new(conf.to_str().unwrap()).unwrap();
         view = std::ptr::null_mut();
         error = std::ptr::null_mut();
-        let rc = et_import_package(
-            conf_c.as_ptr(),
-            package_c.as_ptr(),
-            package_name.as_ptr(),
-            1,
-            &mut view,
-            &mut error,
-        );
+        let rc = et_import_package(conf_c.as_ptr(), &mut view, &mut error);
         assert_eq!(rc, 0, "{}", unsafe {
             if error.is_null() {
                 String::new()
@@ -381,10 +369,11 @@ mod tests {
         });
         assert!(error.is_null());
         let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
-        assert!(view_text.contains("\"name\":\"imported\""));
+        assert!(view_text.contains("\"name\":\"kept\""));
         assert!(view_text.contains("\"name\":\"boot\""));
         assert!(view_text.contains("1572864"));
         et_string_free(view);
         assert!(package.join("manifest.json").is_file());
+        assert!(!tmp.0.join("imported.etpk").exists());
     }
 }

@@ -49,7 +49,6 @@ bool createPackage(const QString &directory, const QString &name, quint64 userAr
 
 bool openPackage(const QString &directory, bool discardUnsaved, QString *viewJson, QString *error);
 
-bool importPackage(const QString &sourceFile, const QString &directory, const QString &name,
-                   bool discardUnsaved, QString *viewJson, QString *error);
+bool importPackage(const QString &sourceFile, QString *viewJson, QString *error);
 
 }
