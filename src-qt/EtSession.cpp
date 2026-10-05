@@ -154,6 +154,10 @@ bool DocumentView::parse(const QString &json, DocumentView *out, QString *error)
             || !readString(object, QStringLiteral("type"), &partition.type, error)) {
             return false;
         }
+        if (!readU64(object.value(QStringLiteral("attributes")), &partition.attributes)) {
+            *error = QStringLiteral("文档视图缺少 attributes");
+            return false;
+        }
         if (!readU64(object.value(QStringLiteral("startBytes")), &partition.startBytes)) {
             *error = QStringLiteral("文档视图缺少 startBytes");
             return false;

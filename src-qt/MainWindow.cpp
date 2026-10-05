@@ -397,8 +397,10 @@ void MainWindow::applyDocument(const DocumentView &view) {
         row.utilization = utilizationText(partition);
         rows.append(row);
     }
+    m_partitions = view.partitions;
+    m_sectorSize = view.sectorSize;
     m_partitionList->setPartitions(rows);
-    m_partitionEditor->setSelectionAvailable(false);
+    onPartitionSelectionChanged(m_partitionList->hasSelection());
 
     m_issueList->blockSignals(true);
     m_issueList->clear();
@@ -507,7 +509,21 @@ void MainWindow::download() {
 }
 
 void MainWindow::onPartitionSelectionChanged(bool hasSelection) {
-    m_partitionEditor->setSelectionAvailable(hasSelection);
+    if (m_partitionEditor == nullptr) {
+        return;
+    }
+    if (!hasSelection || m_partitionList == nullptr) {
+        m_partitionEditor->clearPartition();
+        return;
+    }
+    const QString id = m_partitionList->selectedPartitionId();
+    for (const PartitionView &partition : m_partitions) {
+        if (partition.id == id) {
+            m_partitionEditor->setPartition(partition, m_sectorSize);
+            return;
+        }
+    }
+    m_partitionEditor->clearPartition();
 }
 
 void MainWindow::onPartitionChecksChanged() {

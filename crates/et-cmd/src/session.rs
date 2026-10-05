@@ -39,6 +39,7 @@ pub struct ViewPartition {
     pub name: String,
     #[serde(rename = "type")]
     pub partition_type: String,
+    pub attributes: u64,
     pub start_bytes: u64,
     pub start_fixed: bool,
     pub size_bytes: Option<u64>,
@@ -214,6 +215,7 @@ fn document_view(
             id: partition.id.clone(),
             name: partition.name.clone(),
             partition_type: partition.partition_type.clone(),
+            attributes: partition.attributes,
             start_bytes: placed
                 .get(index)
                 .and_then(|place| place.start_bytes)
@@ -418,6 +420,7 @@ mod tests {
         assert!(!view.dirty);
         assert_eq!(view.partitions.len(), 1);
         assert_eq!(view.partitions[0].name, "boot");
+        assert_eq!(view.partitions[0].attributes, 0);
         assert_eq!(view.partitions[0].start_bytes, 1024 * 1024);
         assert!(!view.partitions[0].start_fixed);
         assert!(view.partitions[0].image_bytes.is_none());

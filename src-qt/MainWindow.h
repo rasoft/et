@@ -1,5 +1,7 @@
 #pragma once
 
+#include "EtSession.h"
+
 #include <QMainWindow>
 #include <QString>
 
@@ -9,7 +11,6 @@ class QAction;
 class QLabel;
 class QListWidget;
 class QWidget;
-struct DocumentView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -51,6 +52,8 @@ private:
 
     PartitionListWidget *m_partitionList = nullptr;
     PartitionEditorWidget *m_partitionEditor = nullptr;
+    QVector<PartitionView> m_partitions;
+    quint32 m_sectorSize = 512;
     QWidget *m_openSummary = nullptr;
     QLabel *m_closedSummary = nullptr;
     QLabel *m_nameValue = nullptr;

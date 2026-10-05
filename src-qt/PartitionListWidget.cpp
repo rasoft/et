@@ -238,6 +238,23 @@ bool PartitionListWidget::hasSelection() const {
     return selectionModel() != nullptr && selectionModel()->hasSelection();
 }
 
+QString PartitionListWidget::selectedPartitionId() const {
+    const auto *items = qobject_cast<const QStandardItemModel *>(model());
+    const QItemSelectionModel *selection = selectionModel();
+    if (items == nullptr || selection == nullptr) {
+        return {};
+    }
+    const QModelIndexList rows = selection->selectedRows(Name);
+    if (rows.isEmpty()) {
+        return {};
+    }
+    const QStandardItem *name = items->item(rows.first().row(), Name);
+    if (name == nullptr) {
+        return {};
+    }
+    return name->data(Qt::UserRole).toString();
+}
+
 bool PartitionListWidget::hasChecked() const {
     return !checkedPartitionIds().isEmpty();
 }

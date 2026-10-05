@@ -8,6 +8,7 @@ struct PartitionView {
     QString id;
     QString name;
     QString type;
+    quint64 attributes = 0;
     quint64 startBytes = 0;
     bool startFixed = false;
     bool hasSizeBytes = false;

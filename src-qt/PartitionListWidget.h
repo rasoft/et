@@ -31,6 +31,7 @@ public:
     explicit PartitionListWidget(QWidget *parent = nullptr);
 
     bool hasSelection() const;
+    QString selectedPartitionId() const;
     bool hasChecked() const;
     QStringList checkedPartitionIds() const;
     void clearPartitions();
