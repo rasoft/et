@@ -16,8 +16,8 @@ et 分成三层：
 应用命令层 (Rust, C ABI)
     打开的包、脏标记、撤销栈、文件对话框路径
 et-core (Rust)
-    manifest、布局、校验、镜像复制
-磁盘上的 .etpk 目录
+    manifest、布局、校验、镜像复制、etpk 打包与解包
+临时目录里的工作副本，保存为 .etpk 文件
 ```
 
 界面不自行计算起点和重叠。每次编辑后，核心库返回新的分区视图（含计算后的起点）和校验列表，界面整表刷新。
@@ -40,9 +40,9 @@ Qt 与 Rust 之间只过 C ABI。`DocumentView` 用 UTF-8 JSON 字符串传递�
 
 ### 2.2 工作格式
 
-编辑时的包是**目录**，不是单个压缩文件。分区镜像经常到数 GB，压缩包做随机替换和崩溃恢复都很差。`manifest.json` 很小，用“写入临时文件再改名”就能安全保存。镜像在用户选定的那一刻复制进 `images/`，保存不再碰这些字节。
+编辑时的工作副本是**临时目录**，不是在压缩包里随机改分区。分区镜像经常到数 GB，直接在 zip 里替换和崩溃恢复都很差。用户保存时把这个目录打包成单个 `.etpk` 文件（不压缩的 zip，大文件用 ZIP64）。打开时解包到新的临时目录。保存后文档仍然打开，工作副本留在原地。
 
-分发用的单个 zip 放到 P1（FR-PKG-06），不作为编辑格式。
+`manifest.json` 很小，工作副本里用“写入临时文件再改名”保存。镜像在用户选定的那一刻复制进 `images/`，之后打包只按原样写入这些字节。
 
 不采用的做法：
 
@@ -99,10 +99,10 @@ docs/               设计文档
 
 界面不直接改文档。命令集与第一期按钮一一对应：
 
-- `create_package(dir, metadata)`
-- `open_package(dir) -> DocumentView`
-- `save()`
-- `save_as(dir)`
+- `create_package(metadata)` — 在临时目录创建工作副本
+- `open_package(file) -> DocumentView` — 把 etpk 文件解包到临时目录
+- `save(file)` — 把工作副本打包成 etpk 文件，不关闭文档
+- `save_as(file)`
 - `set_metadata(patch)`
 - `add_partition(name, sizeBytes)`
 - `remove_partition(id)`
@@ -141,9 +141,10 @@ P1 再加 `move_partition`、`set_start`、`set_type`。
 
 ## 4. 大文件与完整性
 
-- 打开包：读 manifest 文本，对每个镜像做 `metadata` 级别的存在性和长度检查，不读内容。
+- 打开包：把 etpk 解包到临时目录，读 manifest 文本，对每个镜像做 `metadata` 级别的存在性和长度检查，不读内容。
 - 指定镜像：流式复制。复制到 `images/<id>.img.partial`，完成后改名为正式文件。失败则删除 partial。
-- 保存：把 manifest 序列化到 `manifest.json.tmp`，`fsync`，再改名为 `manifest.json`。
+- 工作副本里的 manifest：序列化到 `manifest.json.tmp`，`fsync`，再改名为 `manifest.json`。
+- 保存 etpk：把工作副本流式写入不压缩的 zip，先写临时文件再替换目标。保存后不删除工作副本，也不关闭文档。
 - 校验和：P1 可选字段，用流式 SHA-256，不在每次打开时强制重算。第一期 manifest 不写校验和，避免保存变慢。
 
 ## 5. 下载如何接进来

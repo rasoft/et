@@ -36,13 +36,9 @@ fn version_cstring() -> &'static CString {
     VERSION.get_or_init(|| CString::new(et_core::version()).expect("版本号不含内部 NUL"))
 }
 
-/// 新建包并作为当前文档。容量和扇区用整数传入，避免界面侧的 JSON 数字丢掉精度。
+/// 在临时目录新建包并作为当前文档。名称、容量和扇区由命令层固定。
 #[no_mangle]
 pub extern "C" fn et_create_package(
-    dir_utf8: *const c_char,
-    name_utf8: *const c_char,
-    user_area_bytes: u64,
-    sector_size: u32,
     discard_unsaved: i32,
     out_view: *mut *mut c_char,
     out_error: *mut *mut c_char,
@@ -56,17 +52,7 @@ pub extern "C" fn et_create_package(
     }
 
     let result = (|| {
-        let dir = c_str(dir_utf8, "目录")?;
-        let name = c_str(name_utf8, "名称")?;
-        let view = with_session(|session| {
-            session.create_package(
-                Path::new(dir),
-                name,
-                user_area_bytes,
-                sector_size,
-                discard_unsaved != 0,
-            )
-        })?;
+        let view = with_session(|session| session.create_package(discard_unsaved != 0))?;
         view.to_json()
     })();
 
@@ -79,10 +65,10 @@ pub extern "C" fn et_create_package(
     }
 }
 
-/// 打开已有包并作为当前文档。失败时不替换当前会话。
+/// 把 etpk 文件解包到临时目录并作为当前文档。失败时不替换当前会话。
 #[no_mangle]
 pub extern "C" fn et_open_package(
-    dir_utf8: *const c_char,
+    file_utf8: *const c_char,
     discard_unsaved: i32,
     out_view: *mut *mut c_char,
     out_error: *mut *mut c_char,
@@ -96,9 +82,9 @@ pub extern "C" fn et_open_package(
     }
 
     let result = (|| {
-        let dir = c_str(dir_utf8, "目录")?;
+        let file = c_str(file_utf8, "文件")?;
         let view =
-            with_session(|session| session.open_package(Path::new(dir), discard_unsaved != 0))?;
+            with_session(|session| session.open_package(Path::new(file), discard_unsaved != 0))?;
         view.to_json()
     })();
 
@@ -109,6 +95,42 @@ pub extern "C" fn et_open_package(
             1
         }
     }
+}
+
+/// 把当前工作副本打包成 etpk 文件。成功后文档仍然打开。
+#[no_mangle]
+pub extern "C" fn et_save_package(
+    file_utf8: *const c_char,
+    out_view: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_view.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_view = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let file = c_str(file_utf8, "文件")?;
+        let view = with_session(|session| session.save_package(Path::new(file)))?;
+        view.to_json()
+    })();
+
+    match result {
+        Ok(json) => write_out(out_view, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
+/// 关掉当前文档并删除临时工作副本。
+#[no_mangle]
+pub extern "C" fn et_close_package() {
+    with_session(|session| session.close());
 }
 
 /// 列出可导入的分区表和镜像。不改当前会话。
@@ -231,8 +253,8 @@ fn write_out(slot: *mut *mut c_char, text: String) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        et_abi_version, et_create_package, et_import_package, et_open_package, et_preview_import,
-        et_string_free, et_version,
+        et_abi_version, et_close_package, et_create_package, et_import_package, et_open_package,
+        et_preview_import, et_save_package, et_string_free, et_version,
     };
     use std::ffi::{CStr, CString};
     use std::fs;
@@ -290,66 +312,47 @@ mod tests {
     #[test]
     fn create_package_ffi_returns_json_or_an_error_string() {
         let _session = session_test_lock();
-        let dir = CString::new("unused").unwrap();
-        let name = CString::new("unused").unwrap();
         assert_eq!(
-            et_create_package(
-                dir.as_ptr(),
-                name.as_ptr(),
-                0,
-                512,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ),
+            et_create_package(0, std::ptr::null_mut(), std::ptr::null_mut()),
             1
         );
 
         let tmp = TempDir::new();
-        let missing = tmp.0.join("nope.etpk");
-        let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
-        let empty_name = CString::new("").unwrap();
         let mut view = std::ptr::null_mut();
         let mut error = std::ptr::null_mut();
-        let rc = et_create_package(
-            missing_c.as_ptr(),
-            empty_name.as_ptr(),
-            16 * 1024 * 1024 * 1024,
-            512,
-            0,
-            &mut view,
-            &mut error,
-        );
-        assert_eq!(rc, 1);
-        assert!(view.is_null());
-        assert!(!missing.exists());
-        let error_text = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
-        assert_eq!(error_text, "名称为空");
-        et_string_free(error);
+        let rc = et_create_package(1, &mut view, &mut error);
+        assert_eq!(rc, 0);
+        assert!(error.is_null());
+        let view_text = unsafe { CStr::from_ptr(view) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(view_text.contains("\"dirty\":true"));
+        assert!(view_text.contains("\"archive\":null"));
+        assert!(view_text.contains("\"name\":\"Untitled\""));
+        assert!(view_text.contains("\"userAreaBytes\":null"));
+        assert!(view_text.contains("\"sectorSize\":512"));
+        assert!(view_text.contains("\"alignment\":1048576"));
+        et_string_free(view);
 
-        let package = tmp.0.join("board-d1.etpk");
+        let package = tmp.0.join("Untitled.etpk");
         let package_c = CString::new(package.to_str().unwrap()).unwrap();
-        let package_name = CString::new("board-d1").unwrap();
         view = std::ptr::null_mut();
         error = std::ptr::null_mut();
-        let rc = et_create_package(
-            package_c.as_ptr(),
-            package_name.as_ptr(),
-            16 * 1024 * 1024 * 1024,
-            512,
-            0,
-            &mut view,
-            &mut error,
-        );
-        assert_eq!(rc, 0);
+        let rc = et_save_package(package_c.as_ptr(), &mut view, &mut error);
+        assert_eq!(rc, 0, "{}", unsafe {
+            if error.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(error).to_string_lossy().into_owned()
+            }
+        });
         assert!(error.is_null());
         let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
         assert!(view_text.contains("\"dirty\":false"));
-        assert!(view_text.contains("\"name\":\"board-d1\""));
-        assert!(view_text.contains("17179869184"));
+        assert!(view_text.contains("Untitled.etpk"));
         et_string_free(view);
-        assert!(package.join("manifest.json").is_file());
-        assert!(package.join("images").is_dir());
+        assert!(package.is_file());
 
         view = std::ptr::null_mut();
         error = std::ptr::null_mut();
@@ -366,9 +369,11 @@ mod tests {
         assert_eq!(rc, 0);
         assert!(error.is_null());
         let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
-        assert!(view_text.contains("\"name\":\"board-d1\""));
+        assert!(view_text.contains("\"name\":\"Untitled\""));
         assert!(view_text.contains("\"partitions\":[]"));
+        assert!(view_text.contains("\"dirty\":false"));
         et_string_free(view);
+        et_close_package();
     }
 
     #[test]
@@ -386,22 +391,17 @@ mod tests {
         );
 
         let tmp = TempDir::new();
-        let package = tmp.0.join("kept.etpk");
-        let package_c = CString::new(package.to_str().unwrap()).unwrap();
-        let package_name = CString::new("kept").unwrap();
         let mut view = std::ptr::null_mut();
         let mut error = std::ptr::null_mut();
-        let rc = et_create_package(
-            package_c.as_ptr(),
-            package_name.as_ptr(),
-            16 * 1024 * 1024 * 1024,
-            512,
-            1,
-            &mut view,
-            &mut error,
-        );
+        let rc = et_create_package(1, &mut view, &mut error);
         assert_eq!(rc, 0);
+        let created = unsafe { CStr::from_ptr(view) }
+            .to_str()
+            .unwrap()
+            .to_string();
         et_string_free(view);
+        let created_json: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let root = std::path::PathBuf::from(created_json["root"].as_str().unwrap());
 
         let missing = tmp.0.join("missing.conf");
         let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
@@ -416,7 +416,7 @@ mod tests {
         );
         assert_eq!(rc, 1);
         assert!(view.is_null());
-        assert!(package.join("manifest.json").is_file());
+        assert!(root.join("manifest.json").is_file());
         let error_text = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
         assert!(error_text.contains("文件不存在"));
         et_string_free(error);
@@ -452,11 +452,12 @@ mod tests {
         });
         assert!(error.is_null());
         let view_text = unsafe { CStr::from_ptr(view) }.to_str().unwrap();
-        assert!(view_text.contains("\"name\":\"kept\""));
+        assert!(view_text.contains("\"name\":\"Untitled\""));
         assert!(view_text.contains("\"name\":\"boot\""));
         assert!(view_text.contains("1572864"));
         et_string_free(view);
-        assert!(package.join("manifest.json").is_file());
+        assert!(root.join("manifest.json").is_file());
         assert!(!tmp.0.join("imported.etpk").exists());
+        et_close_package();
     }
 }

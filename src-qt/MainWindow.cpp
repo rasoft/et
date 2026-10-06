@@ -2,12 +2,12 @@
 
 #include "EtSession.h"
 #include "ImportChoicesDialog.h"
-#include "NewPackageDialog.h"
 #include "PartitionEditorWidget.h"
 #include "PartitionListWidget.h"
 #include "ToolbarIcons.h"
 
 #include <QAction>
+#include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -84,15 +84,15 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 void MainWindow::createActions() {
-    m_newPackage = new QAction(QStringLiteral("新建..."), this);
+    m_newPackage = new QAction(QStringLiteral("新建"), this);
     m_newPackage->setIconText(QStringLiteral("新建"));
     m_newPackage->setShortcut(QKeySequence::New);
-    m_newPackage->setStatusTip(QStringLiteral("新建镜像包"));
+    m_newPackage->setStatusTip(QStringLiteral("在临时目录新建镜像包"));
 
     m_openPackage = new QAction(QStringLiteral("打开..."), this);
     m_openPackage->setIconText(QStringLiteral("打开"));
     m_openPackage->setShortcut(QKeySequence::Open);
-    m_openPackage->setStatusTip(QStringLiteral("打开镜像包"));
+    m_openPackage->setStatusTip(QStringLiteral("从 etpk 文件打开镜像包"));
 
     m_importPackage = new QAction(QStringLiteral("导入..."), this);
     m_importPackage->setIconText(QStringLiteral("导入"));
@@ -100,7 +100,7 @@ void MainWindow::createActions() {
 
     m_savePackage = new QAction(QStringLiteral("保存"), this);
     m_savePackage->setShortcut(QKeySequence::Save);
-    m_savePackage->setStatusTip(QStringLiteral("保存当前镜像包"));
+    m_savePackage->setStatusTip(QStringLiteral("把工作副本打包成 etpk 文件"));
 
     m_quit = new QAction(QStringLiteral("退出"), this);
     m_quit->setMenuRole(QAction::QuitRole);
@@ -291,6 +291,98 @@ bool MainWindow::confirmReplace(const QString &title, const QString &question, b
     return true;
 }
 
+bool MainWindow::confirmSaveOrDiscard(const QString &title) {
+    if (!m_hasDocument || !m_dirty) {
+        return true;
+    }
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(title);
+    box.setText(QStringLiteral("当前镜像包有未保存的修改。要保存吗？"));
+    auto *save = box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
+    auto *discard = box.addButton(QStringLiteral("不保存"), QMessageBox::DestructiveRole);
+    auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(qobject_cast<QPushButton *>(save));
+    box.setEscapeButton(qobject_cast<QPushButton *>(cancel));
+    box.exec();
+    if (box.clickedButton() == discard) {
+        return true;
+    }
+    if (box.clickedButton() == save) {
+        return saveToArchive(QString());
+    }
+    return false;
+}
+
+QString MainWindow::browseDirectory() const {
+    if (!m_archivePath.isEmpty()) {
+        const QString directory = QFileInfo(m_archivePath).absolutePath();
+        if (!directory.isEmpty()) {
+            return directory;
+        }
+    }
+    return QDir::homePath();
+}
+
+QString MainWindow::askArchivePath() {
+    QString name = m_nameValue == nullptr ? QString() : m_nameValue->text().trimmed();
+    QString safe;
+    const QString forbidden = QStringLiteral("/\\:<>\"|?*");
+    for (const QChar ch : name) {
+        if (ch.unicode() < 0x20 || forbidden.contains(ch)) {
+            safe.append(QLatin1Char('_'));
+        } else {
+            safe.append(ch);
+        }
+    }
+    safe = safe.trimmed();
+    if (safe.isEmpty() || safe == QLatin1String(".") || safe == QLatin1String("..")) {
+        safe = QStringLiteral("未命名");
+    }
+    if (!safe.endsWith(QStringLiteral(".etpk"), Qt::CaseInsensitive)) {
+        safe.append(QStringLiteral(".etpk"));
+    }
+    const QString suggested = QDir(browseDirectory()).filePath(safe);
+    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存镜像包"), suggested,
+                                                QStringLiteral("镜像包 (*.etpk)"), nullptr,
+                                                QFileDialog::DontUseNativeDialog);
+    if (path.isEmpty()) {
+        return {};
+    }
+    if (!path.endsWith(QStringLiteral(".etpk"), Qt::CaseInsensitive)) {
+        path += QStringLiteral(".etpk");
+    }
+    return path;
+}
+
+bool MainWindow::saveToArchive(const QString &path) {
+    if (!m_hasDocument) {
+        showWarning(QStringLiteral("保存镜像包"), QStringLiteral("请先新建或打开镜像包"));
+        return false;
+    }
+    QString target = path.isEmpty() ? m_archivePath : path;
+    if (target.isEmpty()) {
+        target = askArchivePath();
+        if (target.isEmpty()) {
+            return false;
+        }
+    }
+    QString viewJson;
+    QString error;
+    if (!EtSession::savePackage(target, &viewJson, &error)) {
+        showWarning(QStringLiteral("保存镜像包"), error);
+        return false;
+    }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("保存镜像包"),
+                    QStringLiteral("已写入 %1，但界面没能读回结果：%2").arg(target, error));
+        return false;
+    }
+    applyDocument(view);
+    return true;
+}
+
 void MainWindow::showWarning(const QString &title, const QString &text) {
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
@@ -301,69 +393,65 @@ void MainWindow::showWarning(const QString &title, const QString &text) {
 }
 
 void MainWindow::newPackage() {
-    bool discardUnsaved = false;
-    if (!confirmReplace(QStringLiteral("新建镜像包"),
-                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并新建吗？"),
-                        &discardUnsaved)) {
-        return;
-    }
-
-    NewPackageDialog dialog(this);
-    while (dialog.exec() == QDialog::Accepted) {
-        QString viewJson;
-        QString error;
-        if (!EtSession::createPackage(dialog.directory(), dialog.packageName(), dialog.userAreaBytes(),
-                                      dialog.sectorSize(), discardUnsaved, &viewJson, &error)) {
-            showWarning(QStringLiteral("新建镜像包"), error);
-            continue;
-        }
-        DocumentView view;
-        if (!DocumentView::parse(viewJson, &view, &error)) {
-            showWarning(QStringLiteral("新建镜像包"),
-                        QStringLiteral("已创建 %1，但界面没能读回结果：%2").arg(dialog.directory(), error));
-            return;
-        }
-        applyDocument(view);
-        return;
-    }
-}
-
-void MainWindow::openPackage() {
-    bool discardUnsaved = false;
-    if (!confirmReplace(QStringLiteral("打开镜像包"),
-                        QStringLiteral("当前镜像包有未保存的修改。要放弃这些修改并打开另一个吗？"),
-                        &discardUnsaved)) {
-        return;
-    }
-
-    const QString start =
-        m_packageRoot.isEmpty() ? QDir::homePath() : QFileInfo(m_packageRoot).absolutePath();
-    const QString directory = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("打开镜像包"), start,
-        QFileDialog::DontUseNativeDialog | QFileDialog::ShowDirsOnly);
-    if (directory.isEmpty()) {
+    if (!confirmSaveOrDiscard(QStringLiteral("新建镜像包"))) {
         return;
     }
 
     QString viewJson;
     QString error;
-    if (!EtSession::openPackage(directory, discardUnsaved, &viewJson, &error)) {
+    if (!EtSession::createPackage(m_dirty, &viewJson, &error)) {
+        showWarning(QStringLiteral("新建镜像包"), error);
+        return;
+    }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("新建镜像包"),
+                    QStringLiteral("已创建工作副本，但界面没能读回结果：%1").arg(error));
+        return;
+    }
+    applyDocument(view);
+}
+
+void MainWindow::openPackage() {
+    if (!confirmSaveOrDiscard(QStringLiteral("打开镜像包"))) {
+        return;
+    }
+
+    const QString archiveFile = QFileDialog::getOpenFileName(
+        this, QStringLiteral("打开镜像包"), browseDirectory(),
+        QStringLiteral("镜像包 (*.etpk);;所有文件 (*)"), nullptr, QFileDialog::DontUseNativeDialog);
+    if (archiveFile.isEmpty()) {
+        return;
+    }
+
+    QString viewJson;
+    QString error;
+    if (!EtSession::openPackage(archiveFile, m_dirty, &viewJson, &error)) {
         showWarning(QStringLiteral("打开镜像包"), error);
         return;
     }
     DocumentView view;
     if (!DocumentView::parse(viewJson, &view, &error)) {
         showWarning(QStringLiteral("打开镜像包"),
-                    QStringLiteral("已打开 %1，但界面没能读回结果：%2").arg(directory, error));
+                    QStringLiteral("已打开 %1，但界面没能读回结果：%2").arg(archiveFile, error));
         return;
     }
     applyDocument(view);
 }
 
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (!confirmSaveOrDiscard(QStringLiteral("退出"))) {
+        event->ignore();
+        return;
+    }
+    EtSession::closePackage();
+    event->accept();
+}
+
 void MainWindow::applyDocument(const DocumentView &view) {
     m_hasDocument = true;
     m_dirty = view.dirty;
-    m_packageRoot = view.root;
+    m_archivePath = view.archive;
     m_closedSummary->setVisible(false);
     m_openSummary->setVisible(true);
     m_nameValue->setText(view.name);
@@ -377,8 +465,10 @@ void MainWindow::applyDocument(const DocumentView &view) {
         state += QStringLiteral("，含错误");
     }
     m_stateValue->setText(state);
-    setWindowTitle(view.dirty ? QStringLiteral("%1* — et").arg(view.name)
-                              : QStringLiteral("%1 — et").arg(view.name));
+    const QString titleName =
+        view.archive.isEmpty() ? view.name : QFileInfo(view.archive).fileName();
+    setWindowTitle(view.dirty ? QStringLiteral("%1* — et").arg(titleName)
+                              : QStringLiteral("%1 — et").arg(titleName));
 
     QVector<PartitionRow> rows;
     rows.reserve(view.partitions.size());
@@ -413,7 +503,7 @@ void MainWindow::applyDocument(const DocumentView &view) {
     m_issueList->blockSignals(false);
     m_issueList->setVisible(!view.issues.isEmpty());
 
-    statusBar()->showMessage(view.root);
+    statusBar()->showMessage(view.archive.isEmpty() ? QStringLiteral("尚未保存") : view.archive);
     updateActionStates();
 }
 
@@ -430,10 +520,8 @@ void MainWindow::importPackage() {
         return;
     }
 
-    const QString start =
-        m_packageRoot.isEmpty() ? QDir::homePath() : QFileInfo(m_packageRoot).absolutePath();
     const QString source = QFileDialog::getOpenFileName(
-        this, QStringLiteral("导入"), start,
+        this, QStringLiteral("导入"), browseDirectory(),
         QStringLiteral("可导入的文件 (*.conf *.config *.bin);;"
                        "flash.conf (*.conf *.config);;"
                        "download.bin (*.bin);;"
@@ -474,7 +562,7 @@ void MainWindow::importPackage() {
 }
 
 void MainWindow::savePackage() {
-    showPending(QStringLiteral("保存"));
+    saveToArchive(QString());
 }
 
 void MainWindow::newPartition() {

@@ -28,6 +28,7 @@ struct IssueView {
 
 struct DocumentView {
     QString root;
+    QString archive;
     QString name;
     QString description;
     bool hasUserAreaBytes = false;
@@ -74,10 +75,13 @@ struct ImportPreview {
 
 namespace EtSession {
 
-bool createPackage(const QString &directory, const QString &name, quint64 userAreaBytes,
-                   quint32 sectorSize, bool discardUnsaved, QString *viewJson, QString *error);
+bool createPackage(bool discardUnsaved, QString *viewJson, QString *error);
 
-bool openPackage(const QString &directory, bool discardUnsaved, QString *viewJson, QString *error);
+bool openPackage(const QString &archiveFile, bool discardUnsaved, QString *viewJson, QString *error);
+
+bool savePackage(const QString &archiveFile, QString *viewJson, QString *error);
+
+void closePackage();
 
 bool previewImport(const QString &sourceFile, QString *previewJson, QString *error);
 

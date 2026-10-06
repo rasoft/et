@@ -10,7 +10,7 @@
 | --- | --- |
 | [需求](docs/requirements.md) | 用户、场景、功能与非功能需求、范围边界 |
 | [架构](docs/architecture.md) | 技术选型、分层、编辑模型、下载扩展点 |
-| [包格式](docs/package-format.md) | `.etpk` 目录布局与 `manifest.json` 规范 |
+| [包格式](docs/package-format.md) | `.etpk` 文件与工作副本目录、`manifest.json` 规范 |
 | [路线图](docs/roadmap.md) | 里程碑、交付物与建议的实现顺序 |
 
 ## 构建
@@ -27,11 +27,11 @@ macOS 产物是同时包含 x86_64 和 arm64 的 `build/macos/et.app` 和 `build
 
 ## 已定结论
 
-- **产品形态**：桌面程序。编辑对象是自包含的目录包（`.etpk`），而不是把整颗 eMMC 载入内存。
+- **产品形态**：桌面程序。编辑发生在临时目录里的工作副本，保存和打开的是单个 `.etpk` 文件，而不是把整颗 eMMC 载入内存。
 - **第一期范围**：新建、打开、保存镜像包；增删分区、重命名、改大小、更换分区镜像；保存前做布局校验。
 - **技术栈**：Rust 核心库 `et-core` + Qt 5.15 界面。界面只发编辑命令，分区算术和包读写都在 Rust 里完成。Windows 最低支持 Windows 7 SP1 x64，因此不用依赖 WebView2 的 Tauri。
 - **下载**：不进第一期。包格式和核心库按“镜像始终是可流式读取的文件”来设计，避免以后为 USB 下载改格式。
 
 ## 名字
 
-仓库和产品代号使用 **et**。包目录后缀是 `.etpk`。清单里的格式字段仍是 `format: "etpack"`。
+仓库和产品代号使用 **et**。用户文件后缀是 `.etpk`。清单里的格式字段仍是 `format: "etpack"`。

@@ -105,6 +105,13 @@ bool DocumentView::parse(const QString &json, DocumentView *out, QString *error)
     if (!readString(root, QStringLiteral("root"), &view.root, error)) {
         return false;
     }
+    bool hasArchive = false;
+    if (!readOptionalString(root, QStringLiteral("archive"), &hasArchive, &view.archive, error)) {
+        return false;
+    }
+    if (!hasArchive) {
+        view.archive.clear();
+    }
     if (!readBool(root, QStringLiteral("dirty"), &view.dirty, error)
         || !readBool(root, QStringLiteral("canUndo"), &view.canUndo, error)
         || !readBool(root, QStringLiteral("canRedo"), &view.canRedo, error)) {
@@ -199,20 +206,13 @@ bool DocumentView::parse(const QString &json, DocumentView *out, QString *error)
     return true;
 }
 
-bool EtSession::createPackage(const QString &directory, const QString &name, quint64 userAreaBytes,
-                              quint32 sectorSize, bool discardUnsaved, QString *viewJson,
-                              QString *error) {
+bool EtSession::createPackage(bool discardUnsaved, QString *viewJson, QString *error) {
     if (viewJson == nullptr || error == nullptr) {
         return false;
     }
-    // 容量和扇区走整数参数。QJson 的数字是 double，大于 2^53 的字节数会失真。
-    const QByteArray directoryBytes = directory.toUtf8();
-    const QByteArray nameBytes = name.toUtf8();
     char *view = nullptr;
     char *message = nullptr;
-    const int32_t rc = et_create_package(directoryBytes.constData(), nameBytes.constData(),
-                                         userAreaBytes, sectorSize, discardUnsaved ? 1 : 0, &view,
-                                         &message);
+    const int32_t rc = et_create_package(discardUnsaved ? 1 : 0, &view, &message);
     const QString viewText = takeString(view);
     const QString errorText = takeString(message);
     if (rc != 0) {
@@ -227,16 +227,16 @@ bool EtSession::createPackage(const QString &directory, const QString &name, qui
     return true;
 }
 
-bool EtSession::openPackage(const QString &directory, bool discardUnsaved, QString *viewJson,
+bool EtSession::openPackage(const QString &archiveFile, bool discardUnsaved, QString *viewJson,
                             QString *error) {
     if (viewJson == nullptr || error == nullptr) {
         return false;
     }
-    const QByteArray directoryBytes = directory.toUtf8();
+    const QByteArray fileBytes = archiveFile.toUtf8();
     char *view = nullptr;
     char *message = nullptr;
     const int32_t rc =
-        et_open_package(directoryBytes.constData(), discardUnsaved ? 1 : 0, &view, &message);
+        et_open_package(fileBytes.constData(), discardUnsaved ? 1 : 0, &view, &message);
     const QString viewText = takeString(view);
     const QString errorText = takeString(message);
     if (rc != 0) {
@@ -249,6 +249,32 @@ bool EtSession::openPackage(const QString &directory, bool discardUnsaved, QStri
     }
     *viewJson = viewText;
     return true;
+}
+
+bool EtSession::savePackage(const QString &archiveFile, QString *viewJson, QString *error) {
+    if (viewJson == nullptr || error == nullptr) {
+        return false;
+    }
+    const QByteArray fileBytes = archiveFile.toUtf8();
+    char *view = nullptr;
+    char *message = nullptr;
+    const int32_t rc = et_save_package(fileBytes.constData(), &view, &message);
+    const QString viewText = takeString(view);
+    const QString errorText = takeString(message);
+    if (rc != 0) {
+        *error = errorText.isEmpty() ? QStringLiteral("保存失败") : errorText;
+        return false;
+    }
+    if (viewText.isEmpty()) {
+        *error = QStringLiteral("保存没有返回文档");
+        return false;
+    }
+    *viewJson = viewText;
+    return true;
+}
+
+void EtSession::closePackage() {
+    et_close_package();
 }
 
 bool ImportPreview::parse(const QString &json, ImportPreview *out, QString *error) {

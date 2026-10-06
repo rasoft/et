@@ -1,8 +1,12 @@
 //! 当前打开的包。
 //!
+//! 编辑发生在临时目录里的工作副本。`.etpk` 文件是这份目录的打包结果。
 //! 撤销栈会在编辑命令接入时放在这里。新建成功后没有可撤销的操作。
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -14,6 +18,8 @@ use et_core::Error;
 #[serde(rename_all = "camelCase")]
 pub struct DocumentView {
     pub root: String,
+    /// 最近一次保存或打开的 etpk 文件。新建后还没保存时为 `None`。
+    pub archive: Option<String>,
     pub dirty: bool,
     pub can_undo: bool,
     pub can_redo: bool,
@@ -65,6 +71,7 @@ impl DocumentView {
 #[derive(Debug)]
 pub struct Session {
     root: Option<PathBuf>,
+    archive: Option<PathBuf>,
     manifest: Option<et_core::manifest::Manifest>,
     dirty: bool,
 }
@@ -73,44 +80,76 @@ impl Session {
     pub const fn new() -> Self {
         Self {
             root: None,
+            archive: None,
             manifest: None,
             dirty: false,
         }
     }
 
-    pub fn create_package(
-        &mut self,
-        dir: &Path,
-        name: &str,
-        user_area_bytes: u64,
-        sector_size: u32,
-        discard_unsaved: bool,
-    ) -> Result<DocumentView, Error> {
+    /// 在临时目录创建工作副本并作为当前文档。
+    /// 名称固定为 Untitled，不写容量，扇区 512 字节，对齐 1 MiB。还没有 etpk 文件，因此是未保存。
+    pub fn create_package(&mut self, discard_unsaved: bool) -> Result<DocumentView, Error> {
+        let metadata = Metadata::without_capacity("Untitled", 512)?;
         if self.dirty && !discard_unsaved {
             return Err(Error::new("有未保存的修改"));
         }
-        let metadata = Metadata::try_new(name, user_area_bytes, sector_size)?;
-        let created = disk::create_package(dir, metadata)?;
-        self.root = Some(created.root);
-        self.manifest = Some(created.manifest);
-        self.dirty = false;
-        self.view()
+        let dir = allocate_work_path();
+        let created = disk::create_package(&dir, metadata)?;
+        let view = match document_view(&created.root, None, &created.manifest, true) {
+            Ok(view) => view,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&created.root);
+                return Err(err);
+            }
+        };
+        self.adopt(created.root, created.manifest, None, true);
+        Ok(view)
     }
 
+    /// 把 etpk 文件解包到新的临时目录并作为当前文档。失败时不替换当前会话。
     pub fn open_package(
         &mut self,
-        dir: &Path,
+        file: &Path,
         discard_unsaved: bool,
     ) -> Result<DocumentView, Error> {
         if self.dirty && !discard_unsaved {
             return Err(Error::new("有未保存的修改"));
         }
-        let opened = disk::open_package(dir)?;
-        let view = document_view(&opened.root, &opened.manifest, false)?;
-        self.root = Some(opened.root);
-        self.manifest = Some(opened.manifest);
+        let archive = existing_archive(file)?;
+        let mut work = WorkDir::create()?;
+        et_core::archive::unpack_package(&archive, work.path())?;
+        let opened = disk::open_package(work.path())?;
+        let view = document_view(work.path(), Some(&archive), &opened.manifest, false)?;
+        let root = work.disarm();
+        self.adopt(root, opened.manifest, Some(archive), false);
+        Ok(view)
+    }
+
+    /// 把当前工作副本打包成 etpk 文件。成功后文档仍然打开，脏标记清掉。
+    pub fn save_package(&mut self, file: &Path) -> Result<DocumentView, Error> {
+        let root = self
+            .root
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let manifest = self
+            .manifest
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        let archive = et_core::archive::pack_package(&root, file)?;
+        let view = document_view(&root, Some(&archive), &manifest, false)?;
+        self.archive = Some(archive);
         self.dirty = false;
         Ok(view)
+    }
+
+    /// 丢掉工作副本。退出时调用，避免临时目录留下来。
+    pub fn close(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = fs::remove_dir_all(root);
+        }
+        self.archive = None;
+        self.manifest = None;
+        self.dirty = false;
     }
 
     /// 列出源文件里的分区表和镜像。不改当前包。
@@ -136,7 +175,7 @@ impl Session {
             .ok_or_else(|| Error::new("没有打开的包"))?;
         let manifest = et_core::import::import_selected(source, &root, &current, &selection)?;
         self.manifest = Some(manifest);
-        self.dirty = false;
+        self.dirty = true;
         self.view()
     }
 
@@ -154,7 +193,7 @@ impl Session {
             .ok_or_else(|| Error::new("没有打开的包"))?;
         let manifest = et_core::remove_partitions(&root, &current, &ids)?;
         self.manifest = Some(manifest);
-        self.dirty = false;
+        self.dirty = true;
         self.view()
     }
 
@@ -167,13 +206,99 @@ impl Session {
             .manifest
             .as_ref()
             .ok_or_else(|| Error::new("没有打开的包"))?;
-        document_view(root, manifest, self.dirty)
+        document_view(root, self.archive.as_deref(), manifest, self.dirty)
+    }
+
+    fn adopt(
+        &mut self,
+        root: PathBuf,
+        manifest: et_core::manifest::Manifest,
+        archive: Option<PathBuf>,
+        dirty: bool,
+    ) {
+        if let Some(old) = self.root.take() {
+            if old != root {
+                let _ = fs::remove_dir_all(old);
+            }
+        }
+        self.root = Some(root);
+        self.manifest = Some(manifest);
+        self.archive = archive;
+        self.dirty = dirty;
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }
 
 impl Default for Session {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn allocate_work_path() -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("et-work-{}-{nanos}-{n}", std::process::id()))
+}
+
+struct WorkDir {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl WorkDir {
+    fn create() -> Result<Self, Error> {
+        let path = allocate_work_path();
+        fs::create_dir(&path)
+            .map_err(|err| Error::new(format!("无法创建临时目录（{}）：{err}", path.display())))?;
+        Ok(Self { path, armed: true })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) -> PathBuf {
+        self.armed = false;
+        self.path.clone()
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn existing_archive(file: &Path) -> Result<PathBuf, Error> {
+    if file.as_os_str().is_empty() {
+        return Err(Error::new("没有指定文件"));
+    }
+    match fs::symlink_metadata(file) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(Error::new("文件不存在")),
+        Err(err) => Err(Error::new(format!(
+            "无法读取 etpk 文件（{}）：{err}",
+            file.display()
+        ))),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            Err(Error::new("不是 etpk 文件"))
+        }
+        Ok(_) => file
+            .canonicalize()
+            .map_err(|err| Error::new(format!("无法解析文件（{}）：{err}", file.display()))),
     }
 }
 
@@ -198,6 +323,7 @@ fn parse_partition_ids(json: &str) -> Result<Vec<String>, Error> {
 
 fn document_view(
     root: &Path,
+    archive: Option<&Path>,
     manifest: &et_core::manifest::Manifest,
     dirty: bool,
 ) -> Result<DocumentView, Error> {
@@ -207,6 +333,14 @@ fn document_view(
         .to_str()
         .ok_or_else(|| Error::new("路径不是合法的 UTF-8"))?
         .to_string();
+    let archive = match archive {
+        Some(path) => Some(
+            path.to_str()
+                .ok_or_else(|| Error::new("路径不是合法的 UTF-8"))?
+                .to_string(),
+        ),
+        None => None,
+    };
     let partitions = manifest
         .partitions
         .iter()
@@ -245,6 +379,7 @@ fn document_view(
         .collect();
     Ok(DocumentView {
         root,
+        archive,
         dirty,
         can_undo: false,
         can_redo: false,
@@ -298,96 +433,93 @@ mod tests {
     const GIB16: u64 = 16 * 1024 * 1024 * 1024;
 
     #[test]
-    fn create_package_opens_a_clean_empty_document() {
+    fn create_package_opens_an_unsaved_document_and_save_keeps_it_open() {
         let tmp = TempDir::new();
-        let dir = tmp.path().join("board-d1.etpk");
         let mut session = Session::new();
-        let view = session
-            .create_package(&dir, "board-d1", GIB16, 512, false)
-            .unwrap();
+        let view = session.create_package(false).unwrap();
 
-        assert!(!view.dirty);
+        assert!(view.dirty);
+        assert!(view.archive.is_none());
         assert!(!view.can_undo);
         assert!(!view.can_redo);
         assert!(view.partitions.is_empty());
         assert!(view.issues.is_empty());
-        assert_eq!(view.metadata.name, "board-d1");
-        assert_eq!(view.metadata.user_area_bytes, Some(GIB16));
+        assert_eq!(view.metadata.name, "Untitled");
+        assert_eq!(view.metadata.user_area_bytes, None);
         assert_eq!(view.metadata.sector_size, 512);
         assert_eq!(view.metadata.alignment, 1024 * 1024);
-        assert!(view.root.ends_with("board-d1.etpk"));
-        assert!(!session.dirty);
+        assert!(view.root.contains("et-work-"));
+        assert!(session.dirty);
+        let root = view.root.clone();
 
         let json: serde_json::Value = serde_json::from_str(&view.to_json().unwrap()).unwrap();
-        assert_eq!(json["dirty"], false);
+        assert_eq!(json["dirty"], true);
+        assert_eq!(json["archive"], serde_json::Value::Null);
         assert_eq!(json["canUndo"], false);
         assert_eq!(json["canRedo"], false);
-        assert_eq!(json["metadata"]["name"], "board-d1");
-        assert_eq!(json["metadata"]["userAreaBytes"], serde_json::json!(GIB16));
+        assert_eq!(json["metadata"]["name"], "Untitled");
+        assert_eq!(json["metadata"]["userAreaBytes"], serde_json::Value::Null);
+        assert_eq!(json["metadata"]["sectorSize"], 512);
+        assert_eq!(json["metadata"]["alignment"], 1024 * 1024);
         assert_eq!(json["partitions"], serde_json::json!([]));
         assert_eq!(json["issues"], serde_json::json!([]));
+
+        let dest = tmp.path().join("Untitled.etpk");
+        let saved = session.save_package(&dest).unwrap();
+        assert!(!saved.dirty);
+        assert!(!session.dirty);
+        assert_eq!(saved.root, root);
+        assert!(std::path::Path::new(&root).join("manifest.json").is_file());
+        assert!(saved.archive.as_ref().unwrap().ends_with("Untitled.etpk"));
+        assert!(dest.is_file());
+
+        let mut other = Session::new();
+        let opened = other.open_package(&dest, false).unwrap();
+        assert!(!opened.dirty);
+        assert_eq!(opened.metadata.name, "Untitled");
+        assert_eq!(opened.metadata.user_area_bytes, None);
+        assert_ne!(opened.root, root);
+        assert!(opened.archive.as_ref().unwrap().ends_with("Untitled.etpk"));
     }
 
     #[test]
     fn dirty_document_is_kept_until_discard_is_confirmed() {
-        let tmp = TempDir::new();
-        let first = tmp.path().join("first.etpk");
-        let second = tmp.path().join("second.etpk");
         let mut session = Session::new();
-        session
-            .create_package(&first, "first", GIB16, 512, false)
-            .unwrap();
-        session.dirty = true;
+        let first = session.create_package(false).unwrap();
+        let first_root = std::path::PathBuf::from(&first.root);
 
-        let err = session
-            .create_package(&second, "second", GIB16, 512, false)
-            .unwrap_err();
+        let err = session.create_package(false).unwrap_err();
         assert_eq!(err.message(), "有未保存的修改");
-        assert!(!second.exists());
         assert!(session.dirty);
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
-        assert!(first.join("manifest.json").is_file());
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "Untitled");
+        assert!(first_root.join("manifest.json").is_file());
 
-        let view = session
-            .create_package(&second, "second", GIB16, 4096, true)
-            .unwrap();
-        assert_eq!(view.metadata.name, "second");
-        assert_eq!(view.metadata.sector_size, 4096);
-        assert!(!view.dirty);
-        assert!(!session.dirty);
-        assert!(first.join("manifest.json").is_file());
-        assert!(second.join("manifest.json").is_file());
-    }
-
-    #[test]
-    fn invalid_name_does_not_replace_the_open_package() {
-        let tmp = TempDir::new();
-        let first = tmp.path().join("first.etpk");
-        let second = tmp.path().join("second.etpk");
-        let mut session = Session::new();
-        session
-            .create_package(&first, "first", GIB16, 512, false)
-            .unwrap();
-
-        let err = session
-            .create_package(&second, "", GIB16, 512, false)
-            .unwrap_err();
-        assert_eq!(err.message(), "名称为空");
-        assert!(!second.exists());
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        let view = session.create_package(true).unwrap();
+        assert_eq!(view.metadata.name, "Untitled");
+        assert_eq!(view.metadata.sector_size, 512);
+        assert_eq!(view.metadata.user_area_bytes, None);
+        assert_eq!(view.metadata.alignment, 1024 * 1024);
+        assert_ne!(view.root, first.root);
+        assert!(view.dirty);
+        assert!(session.dirty);
+        assert!(view.archive.is_none());
+        assert!(!first_root.exists());
+        assert!(std::path::Path::new(&view.root)
+            .join("manifest.json")
+            .is_file());
     }
 
     #[test]
     fn open_package_reports_layout_and_keeps_the_previous_document_on_failure() {
         let tmp = TempDir::new();
-        let first = tmp.path().join("first.etpk");
-        let second = tmp.path().join("second.etpk");
         let mut session = Session::new();
-        session
-            .create_package(&first, "first", GIB16, 512, false)
-            .unwrap();
+        let first = session.create_package(false).unwrap();
+        let first_root = first.root.clone();
+        let saved = tmp.path().join("first.etpk");
+        session.save_package(&saved).unwrap();
 
-        fs::create_dir_all(second.join("images")).unwrap();
+        let second_dir = tmp.path().join("second-src");
+        fs::create_dir_all(second_dir.join("images")).unwrap();
         let mut manifest = et_core::manifest::Manifest::new(
             et_core::manifest::Metadata::try_new("second", GIB16, 512).unwrap(),
         );
@@ -401,19 +533,31 @@ mod tests {
             image: Some("../secret.img".to_string()),
             extra: serde_json::Map::new(),
         });
-        fs::write(second.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        fs::write(
+            second_dir.join("manifest.json"),
+            manifest.to_bytes().unwrap(),
+        )
+        .unwrap();
+        let second = tmp.path().join("second.etpk");
+        et_core::archive::pack_package(&second_dir, &second).unwrap();
 
         let err = session.open_package(&second, false).unwrap_err();
         assert!(err.message().contains("越出包目录"));
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "Untitled");
+        assert_eq!(session.root.as_ref().unwrap().to_str().unwrap(), first_root);
 
         manifest.partitions[0].image =
             Some("images/6f1c2a0e-7b4d-4e3a-9c1f-2a8b0d5e6f70.img".to_string());
-        fs::write(second.join("manifest.json"), manifest.to_bytes().unwrap()).unwrap();
+        fs::write(
+            second_dir.join("manifest.json"),
+            manifest.to_bytes().unwrap(),
+        )
+        .unwrap();
+        et_core::archive::pack_package(&second_dir, &second).unwrap();
         session.dirty = true;
         let err = session.open_package(&second, false).unwrap_err();
         assert_eq!(err.message(), "有未保存的修改");
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "Untitled");
 
         let view = session.open_package(&second, true).unwrap();
         assert_eq!(view.metadata.name, "second");
@@ -429,6 +573,8 @@ mod tests {
             .iter()
             .any(|issue| issue.message.contains("不存在")));
         assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "second");
+        assert!(view.archive.as_ref().unwrap().ends_with("second.etpk"));
+        assert!(!std::path::Path::new(&first_root).exists());
     }
 
     #[test]
@@ -443,11 +589,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.message(), "没有打开的包");
 
-        let first = tmp.path().join("first.etpk");
         let mut session = Session::new();
-        let created = session
-            .create_package(&first, "first", GIB16, 512, false)
-            .unwrap();
+        let created = session.create_package(false).unwrap();
         let root = created.root.clone();
         session.dirty = true;
 
@@ -467,9 +610,9 @@ boot boot.img true RAW ro 1 7 0x800 0x400
         let view = session
             .import_package(&conf, r#"{"importTable":true,"images":[0]}"#)
             .unwrap();
-        assert!(!view.dirty);
+        assert!(view.dirty);
         assert_eq!(view.root, root);
-        assert_eq!(view.metadata.name, "first");
+        assert_eq!(view.metadata.name, "Untitled");
         assert_eq!(view.metadata.sector_size, 512);
         assert_eq!(view.partitions.len(), 1);
         assert_eq!(view.partitions[0].name, "boot");
@@ -478,7 +621,7 @@ boot boot.img true RAW ro 1 7 0x800 0x400
         assert_eq!(view.partitions[0].size_bytes, Some(0x400 * 512));
         assert_eq!(view.partitions[0].image_bytes, Some(10));
         assert!(view.issues.is_empty());
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "Untitled");
         assert!(!tmp.path().join("imported.etpk").exists());
 
         let missing = tmp.path().join("missing.conf");
@@ -487,7 +630,7 @@ boot boot.img true RAW ro 1 7 0x800 0x400
             .import_package(&missing, r#"{"importTable":true,"images":[]}"#)
             .unwrap_err();
         assert!(err.message().contains("9 列") || err.message().contains("无法识别"));
-        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "first");
+        assert_eq!(session.manifest.as_ref().unwrap().metadata.name, "Untitled");
         assert_eq!(
             session.manifest.as_ref().unwrap().partitions[0].name,
             "boot"
@@ -496,11 +639,8 @@ boot boot.img true RAW ro 1 7 0x800 0x400
 
     #[test]
     fn remove_partitions_drops_checked_rows_and_reflows_the_next_one() {
-        let tmp = TempDir::new();
         let mut session = Session::new();
-        session
-            .create_package(&tmp.path().join("pkg.etpk"), "board", GIB16, 512, false)
-            .unwrap();
+        session.create_package(false).unwrap();
         let boot = "11111111-1111-4111-8111-111111111111";
         let system = "22222222-2222-4222-8222-222222222222";
         let manifest = session.manifest.as_mut().unwrap();
@@ -530,7 +670,7 @@ boot boot.img true RAW ro 1 7 0x800 0x400
         assert_eq!(view.partitions.len(), 1);
         assert_eq!(view.partitions[0].name, "system");
         assert_eq!(view.partitions[0].start_bytes, 1024 * 1024);
-        assert!(!view.dirty);
+        assert!(view.dirty);
 
         let err = session.remove_partitions("[]").unwrap_err();
         assert_eq!(err.message(), "没有选中的分区");

@@ -21,39 +21,50 @@ const char *et_version(void);
 void et_string_free(char *text);
 
 /* DocumentView JSON 的字段：
- * root、dirty、canUndo、canRedo、
+ * root、archive、dirty、canUndo、canRedo、
  * metadata.name / description / sectorSize / userAreaBytes / alignment、
  * partitions、issues。
+ * root 是临时工作副本目录。archive 是 etpk 文件路径，新建后还没保存时为 JSON null。
  * userAreaBytes 和分区 sizeBytes 可以是 JSON null：容量和最后一个分区的大小留到下载时，
  * 按开发板的真实 eMMC 容量计算。
  * 整数是十进制 JSON number。
  *
- * 新建包并作为当前文档。dir_utf8 和 name_utf8 是以 NUL 结尾的 UTF-8。
- * user_area_bytes 是用户区字节数。sector_size 只能是 512 或 4096。
+ * 在临时目录新建包并作为当前文档。不询问名称、容量或目录。
+ * 名称固定为 Untitled，userAreaBytes 为 null，扇区大小为 512，对齐为 1 MiB。
  * discard_unsaved 非 0 时，若当前包有未保存修改，先丢掉内存里的修改再新建。
  * 成功返回 0，*out_view 是 DocumentView。失败返回 1，*out_error 是说明。
  * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
  */
 int32_t et_create_package(
-    const char *dir_utf8,
-    const char *name_utf8,
-    uint64_t user_area_bytes,
-    uint32_t sector_size,
     int32_t discard_unsaved,
     char **out_view,
     char **out_error);
 
-/* 打开已有包目录并作为当前文档。dir_utf8 是以 NUL 结尾的 UTF-8。
+/* 把 etpk 文件解包到临时目录并作为当前文档。file_utf8 是以 NUL 结尾的 UTF-8。
  * discard_unsaved 非 0 时，若当前包有未保存修改，先丢掉内存里的修改再打开。
  * 成功返回 0，*out_view 是 DocumentView。分区起点、镜像长度和校验项都在这份 JSON 里。
  * 失败返回 1，*out_error 是说明，当前文档保持不变。
  * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
  */
 int32_t et_open_package(
-    const char *dir_utf8,
+    const char *file_utf8,
     int32_t discard_unsaved,
     char **out_view,
     char **out_error);
+
+/* 把当前工作副本打包成 etpk 文件。file_utf8 是目标路径，以 NUL 结尾的 UTF-8。
+ * 成功后文档仍然打开，dirty 为 false，archive 是写入的文件。
+ * 没有打开的包时失败。失败时不改当前会话。
+ * 成功返回 0，*out_view 是 DocumentView。失败返回 1，*out_error 是说明。
+ * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
+ */
+int32_t et_save_package(
+    const char *file_utf8,
+    char **out_view,
+    char **out_error);
+
+/* 关掉当前文档并删除临时工作副本。没有打开的包时什么也不做。 */
+void et_close_package(void);
 
 /* 列出 flash.conf 或 download.bin 里可导入的分区表和镜像。不改当前包。
  * source_utf8 是源文件，以 NUL 结尾的 UTF-8。成功返回 0，*out_preview 是 JSON：

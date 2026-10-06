@@ -5,6 +5,7 @@
 #include <QMainWindow>
 #include <QString>
 
+class QCloseEvent;
 class PartitionEditorWidget;
 class PartitionListWidget;
 class QAction;
@@ -17,6 +18,9 @@ class MainWindow : public QMainWindow {
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void newPackage();
@@ -39,6 +43,10 @@ private:
     void showPending(const QString &command);
     void applyDocument(const DocumentView &view);
     bool confirmReplace(const QString &title, const QString &question, bool *discardUnsaved);
+    bool confirmSaveOrDiscard(const QString &title);
+    bool saveToArchive(const QString &path);
+    QString askArchivePath();
+    QString browseDirectory() const;
     void showWarning(const QString &title, const QString &text);
 
     QAction *m_newPackage = nullptr;
@@ -62,7 +70,7 @@ private:
     QLabel *m_alignmentValue = nullptr;
     QLabel *m_stateValue = nullptr;
     QListWidget *m_issueList = nullptr;
-    QString m_packageRoot;
+    QString m_archivePath;
     bool m_hasDocument = false;
     bool m_dirty = false;
 };
