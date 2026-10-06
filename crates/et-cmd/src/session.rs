@@ -87,7 +87,8 @@ impl Session {
     }
 
     /// 在临时目录创建工作副本并作为当前文档。
-    /// 名称固定为 Untitled，不写容量，扇区 512 字节，对齐 1 MiB。还没有 etpk 文件，因此是未保存。
+    /// 名称固定为 Untitled，不写容量，扇区 512 字节，对齐 1 MiB。
+    /// 还没有 etpk 文件，但文档是未修改的，直到之后的编辑。
     pub fn create_package(&mut self, discard_unsaved: bool) -> Result<DocumentView, Error> {
         let metadata = Metadata::without_capacity("Untitled", 512)?;
         if self.dirty && !discard_unsaved {
@@ -95,14 +96,14 @@ impl Session {
         }
         let dir = allocate_work_path();
         let created = disk::create_package(&dir, metadata)?;
-        let view = match document_view(&created.root, None, &created.manifest, true) {
+        let view = match document_view(&created.root, None, &created.manifest, false) {
             Ok(view) => view,
             Err(err) => {
                 let _ = fs::remove_dir_all(&created.root);
                 return Err(err);
             }
         };
-        self.adopt(created.root, created.manifest, None, true);
+        self.adopt(created.root, created.manifest, None, false);
         Ok(view)
     }
 
@@ -456,7 +457,7 @@ mod tests {
         let mut session = Session::new();
         let view = session.create_package(false).unwrap();
 
-        assert!(view.dirty);
+        assert!(!view.dirty);
         assert!(view.archive.is_none());
         assert!(!view.can_undo);
         assert!(!view.can_redo);
@@ -467,11 +468,11 @@ mod tests {
         assert_eq!(view.metadata.sector_size, 512);
         assert_eq!(view.metadata.alignment, 1024 * 1024);
         assert!(view.root.contains("et-work-"));
-        assert!(session.dirty);
+        assert!(!session.dirty);
         let root = view.root.clone();
 
         let json: serde_json::Value = serde_json::from_str(&view.to_json().unwrap()).unwrap();
-        assert_eq!(json["dirty"], true);
+        assert_eq!(json["dirty"], false);
         assert_eq!(json["archive"], serde_json::Value::Null);
         assert_eq!(json["canUndo"], false);
         assert_eq!(json["canRedo"], false);
@@ -544,6 +545,7 @@ mod tests {
         let mut session = Session::new();
         let first = session.create_package(false).unwrap();
         let first_root = std::path::PathBuf::from(&first.root);
+        session.dirty = true;
 
         let err = session.create_package(false).unwrap_err();
         assert_eq!(err.message(), "有未保存的修改");
@@ -557,8 +559,8 @@ mod tests {
         assert_eq!(view.metadata.user_area_bytes, None);
         assert_eq!(view.metadata.alignment, 1024 * 1024);
         assert_ne!(view.root, first.root);
-        assert!(view.dirty);
-        assert!(session.dirty);
+        assert!(!view.dirty);
+        assert!(!session.dirty);
         assert!(view.archive.is_none());
         assert!(!first_root.exists());
         assert!(std::path::Path::new(&view.root)

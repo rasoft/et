@@ -43,7 +43,6 @@ private:
     void updateActionStates();
     void showPending(const QString &command);
     void applyDocument(const DocumentView &view);
-    bool confirmReplace(const QString &title, const QString &question, bool *discardUnsaved);
     bool confirmSaveOrDiscard(const QString &title);
     bool saveToArchive(const QString &path);
     QString askArchivePath(const QString &title);

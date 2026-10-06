@@ -31,6 +31,7 @@ void et_string_free(char *text);
  *
  * 在临时目录新建包并作为当前文档。不询问名称、容量或目录。
  * 名称固定为 Untitled，userAreaBytes 为 null，扇区大小为 512，对齐为 1 MiB。
+ * 新建的文档没有未保存修改，dirty 为 false。之后的编辑才会把它标成 true。
  * discard_unsaved 非 0 时，若当前包有未保存修改，先丢掉内存里的修改再新建。
  * 成功返回 0，*out_view 是 DocumentView。失败返回 1，*out_error 是说明。
  * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。

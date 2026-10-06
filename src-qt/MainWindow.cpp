@@ -81,6 +81,7 @@ MainWindow::MainWindow(QWidget *parent)
     createCentralWidget();
     createStatusBar();
     updateActionStates();
+    newPackage();
 }
 
 void MainWindow::createActions() {
@@ -278,26 +279,6 @@ void MainWindow::showPending(const QString &command) {
     statusBar()->showMessage(QStringLiteral("「%1」尚未实现").arg(command), 3000);
 }
 
-bool MainWindow::confirmReplace(const QString &title, const QString &question, bool *discardUnsaved) {
-    *discardUnsaved = false;
-    if (!m_hasDocument || !m_dirty) {
-        return true;
-    }
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Question);
-    box.setWindowTitle(title);
-    box.setText(question);
-    auto *discard = box.addButton(QStringLiteral("放弃修改"), QMessageBox::AcceptRole);
-    auto *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-    box.setDefaultButton(qobject_cast<QPushButton *>(cancel));
-    box.exec();
-    if (box.clickedButton() != discard) {
-        return false;
-    }
-    *discardUnsaved = true;
-    return true;
-}
-
 bool MainWindow::confirmSaveOrDiscard(const QString &title) {
     if (!m_hasDocument || !m_dirty) {
         return true;
@@ -473,7 +454,12 @@ void MainWindow::applyDocument(const DocumentView &view) {
                                                     : QStringLiteral("下载时确定"));
     m_sectorValue->setText(QStringLiteral("%1 字节").arg(view.sectorSize));
     m_alignmentValue->setText(formatBytes(view.alignment));
-    QString state = view.dirty ? QStringLiteral("未保存") : QStringLiteral("已保存");
+    QString state = QStringLiteral("已保存");
+    if (view.dirty) {
+        state = QStringLiteral("未保存");
+    } else if (view.archive.isEmpty()) {
+        state = QStringLiteral("未修改");
+    }
     if (view.issueCount > 0) {
         state += QStringLiteral("，含错误");
     }
@@ -516,20 +502,19 @@ void MainWindow::applyDocument(const DocumentView &view) {
     m_issueList->blockSignals(false);
     m_issueList->setVisible(!view.issues.isEmpty());
 
-    statusBar()->showMessage(view.archive.isEmpty() ? QStringLiteral("尚未保存") : view.archive);
+    if (!view.archive.isEmpty()) {
+        statusBar()->showMessage(view.archive);
+    } else if (view.dirty) {
+        statusBar()->showMessage(QStringLiteral("尚未保存"));
+    } else {
+        statusBar()->clearMessage();
+    }
     updateActionStates();
 }
 
 void MainWindow::importPackage() {
     if (!m_hasDocument) {
         showWarning(QStringLiteral("导入"), QStringLiteral("请先新建或打开镜像包"));
-        return;
-    }
-
-    bool discardUnsaved = false;
-    if (!confirmReplace(QStringLiteral("导入"),
-                        QStringLiteral("当前镜像包有未保存的修改。继续导入会丢掉这些修改。要继续吗？"),
-                        &discardUnsaved)) {
         return;
     }
 
@@ -555,7 +540,7 @@ void MainWindow::importPackage() {
         showWarning(QStringLiteral("导入"), error);
         return;
     }
-    ImportChoicesDialog dialog(QFileInfo(source).fileName(), preview, this);
+    ImportChoicesDialog dialog(QFileInfo(source).fileName(), preview, m_partitions, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }

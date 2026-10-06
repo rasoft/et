@@ -358,7 +358,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(view_text.contains("\"dirty\":true"));
+        assert!(view_text.contains("\"dirty\":false"));
         assert!(view_text.contains("\"archive\":null"));
         assert!(view_text.contains("\"name\":\"Untitled\""));
         assert!(view_text.contains("\"userAreaBytes\":null"));
