@@ -273,6 +273,28 @@ bool EtSession::savePackage(const QString &archiveFile, QString *viewJson, QStri
     return true;
 }
 
+bool EtSession::savePackageAs(const QString &archiveFile, QString *viewJson, QString *error) {
+    if (viewJson == nullptr || error == nullptr) {
+        return false;
+    }
+    const QByteArray fileBytes = archiveFile.toUtf8();
+    char *view = nullptr;
+    char *message = nullptr;
+    const int32_t rc = et_save_as_package(fileBytes.constData(), &view, &message);
+    const QString viewText = takeString(view);
+    const QString errorText = takeString(message);
+    if (rc != 0) {
+        *error = errorText.isEmpty() ? QStringLiteral("另存为失败") : errorText;
+        return false;
+    }
+    if (viewText.isEmpty()) {
+        *error = QStringLiteral("另存为没有返回文档");
+        return false;
+    }
+    *viewJson = viewText;
+    return true;
+}
+
 void EtSession::closePackage() {
     et_close_package();
 }

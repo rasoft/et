@@ -102,6 +102,10 @@ void MainWindow::createActions() {
     m_savePackage->setShortcut(QKeySequence::Save);
     m_savePackage->setStatusTip(QStringLiteral("把工作副本打包成 etpk 文件"));
 
+    m_savePackageAs = new QAction(QStringLiteral("另存为..."), this);
+    m_savePackageAs->setShortcut(QKeySequence::SaveAs);
+    m_savePackageAs->setStatusTip(QStringLiteral("把工作副本打包成另一个 etpk 文件，并打开它"));
+
     m_quit = new QAction(QStringLiteral("退出"), this);
     m_quit->setMenuRole(QAction::QuitRole);
     m_quit->setShortcut(QKeySequence::Quit);
@@ -130,6 +134,7 @@ void MainWindow::createActions() {
     connect(m_openPackage, &QAction::triggered, this, &MainWindow::openPackage);
     connect(m_importPackage, &QAction::triggered, this, &MainWindow::importPackage);
     connect(m_savePackage, &QAction::triggered, this, &MainWindow::savePackage);
+    connect(m_savePackageAs, &QAction::triggered, this, &MainWindow::savePackageAs);
     connect(m_quit, &QAction::triggered, this, &QWidget::close);
     connect(m_newPartition, &QAction::triggered, this, &MainWindow::newPartition);
     connect(m_deletePartition, &QAction::triggered, this, &MainWindow::deletePartition);
@@ -142,6 +147,7 @@ void MainWindow::createMenus() {
     fileMenu->addAction(m_openPackage);
     fileMenu->addAction(m_importPackage);
     fileMenu->addAction(m_savePackage);
+    fileMenu->addAction(m_savePackageAs);
     fileMenu->addSeparator();
     fileMenu->addAction(m_quit);
 
@@ -261,6 +267,7 @@ void MainWindow::createStatusBar() {
 void MainWindow::updateActionStates() {
     const bool hasChecked = m_partitionList != nullptr && m_partitionList->hasChecked();
     m_savePackage->setEnabled(m_hasDocument);
+    m_savePackageAs->setEnabled(m_hasDocument);
     m_importPackage->setEnabled(m_hasDocument);
     m_newPartition->setEnabled(m_hasDocument);
     m_deletePartition->setEnabled(m_hasDocument && hasChecked);
@@ -324,8 +331,14 @@ QString MainWindow::browseDirectory() const {
     return QDir::homePath();
 }
 
-QString MainWindow::askArchivePath() {
-    QString name = m_nameValue == nullptr ? QString() : m_nameValue->text().trimmed();
+QString MainWindow::askArchivePath(const QString &title) {
+    QString name;
+    if (!m_archivePath.isEmpty()) {
+        name = QFileInfo(m_archivePath).completeBaseName();
+    }
+    if (name.isEmpty() && m_nameValue != nullptr) {
+        name = m_nameValue->text().trimmed();
+    }
     QString safe;
     const QString forbidden = QStringLiteral("/\\:<>\"|?*");
     for (const QChar ch : name) {
@@ -343,7 +356,7 @@ QString MainWindow::askArchivePath() {
         safe.append(QStringLiteral(".etpk"));
     }
     const QString suggested = QDir(browseDirectory()).filePath(safe);
-    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存镜像包"), suggested,
+    QString path = QFileDialog::getSaveFileName(this, title, suggested,
                                                 QStringLiteral("镜像包 (*.etpk)"), nullptr,
                                                 QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) {
@@ -362,7 +375,7 @@ bool MainWindow::saveToArchive(const QString &path) {
     }
     QString target = path.isEmpty() ? m_archivePath : path;
     if (target.isEmpty()) {
-        target = askArchivePath();
+        target = askArchivePath(QStringLiteral("保存镜像包"));
         if (target.isEmpty()) {
             return false;
         }
@@ -563,6 +576,30 @@ void MainWindow::importPackage() {
 
 void MainWindow::savePackage() {
     saveToArchive(QString());
+}
+
+void MainWindow::savePackageAs() {
+    if (!m_hasDocument) {
+        showWarning(QStringLiteral("另存为"), QStringLiteral("请先新建或打开镜像包"));
+        return;
+    }
+    const QString target = askArchivePath(QStringLiteral("另存为"));
+    if (target.isEmpty()) {
+        return;
+    }
+    QString viewJson;
+    QString error;
+    if (!EtSession::savePackageAs(target, &viewJson, &error)) {
+        showWarning(QStringLiteral("另存为"), error);
+        return;
+    }
+    DocumentView view;
+    if (!DocumentView::parse(viewJson, &view, &error)) {
+        showWarning(QStringLiteral("另存为"),
+                    QStringLiteral("已写入 %1，但界面没能读回结果：%2").arg(target, error));
+        return;
+    }
+    applyDocument(view);
 }
 
 void MainWindow::newPartition() {

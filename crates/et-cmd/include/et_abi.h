@@ -63,6 +63,17 @@ int32_t et_save_package(
     char **out_view,
     char **out_error);
 
+/* 把当前工作副本打包到另一个 etpk 文件，然后关掉当前文档并打开新文件。
+ * 原来的 etpk 文件留在磁盘上，但不再是当前文档。新文件的工作副本是新的临时目录。
+ * 没有打开的包时失败。打包或打开失败时不改当前会话。
+ * 成功返回 0，*out_view 是 DocumentView。失败返回 1，*out_error 是说明。
+ * 两个出参必须非空；函数会先把它们置为 NULL。调用方用 et_string_free 交还。
+ */
+int32_t et_save_as_package(
+    const char *file_utf8,
+    char **out_view,
+    char **out_error);
+
 /* 关掉当前文档并删除临时工作副本。没有打开的包时什么也不做。 */
 void et_close_package(void);
 

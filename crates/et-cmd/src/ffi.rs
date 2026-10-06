@@ -127,6 +127,37 @@ pub extern "C" fn et_save_package(
     }
 }
 
+/// 把当前工作副本打包成另一个 etpk 文件，然后关掉当前文档并打开新文件。
+/// 失败时不替换当前会话。
+#[no_mangle]
+pub extern "C" fn et_save_as_package(
+    file_utf8: *const c_char,
+    out_view: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if out_view.is_null() || out_error.is_null() {
+        return 1;
+    }
+    unsafe {
+        *out_view = std::ptr::null_mut();
+        *out_error = std::ptr::null_mut();
+    }
+
+    let result = (|| {
+        let file = c_str(file_utf8, "文件")?;
+        let view = with_session(|session| session.save_as_package(Path::new(file)))?;
+        view.to_json()
+    })();
+
+    match result {
+        Ok(json) => write_out(out_view, json),
+        Err(err) => {
+            let _ = write_out(out_error, err.message().to_string());
+            1
+        }
+    }
+}
+
 /// 关掉当前文档并删除临时工作副本。
 #[no_mangle]
 pub extern "C" fn et_close_package() {

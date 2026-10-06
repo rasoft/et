@@ -116,13 +116,7 @@ impl Session {
             return Err(Error::new("有未保存的修改"));
         }
         let archive = existing_archive(file)?;
-        let mut work = WorkDir::create()?;
-        et_core::archive::unpack_package(&archive, work.path())?;
-        let opened = disk::open_package(work.path())?;
-        let view = document_view(work.path(), Some(&archive), &opened.manifest, false)?;
-        let root = work.disarm();
-        self.adopt(root, opened.manifest, Some(archive), false);
-        Ok(view)
+        self.replace_with_archive(archive)
     }
 
     /// 把当前工作副本打包成 etpk 文件。成功后文档仍然打开，脏标记清掉。
@@ -140,6 +134,20 @@ impl Session {
         self.archive = Some(archive);
         self.dirty = false;
         Ok(view)
+    }
+
+    /// 把工作副本打包到另一个 etpk 文件，然后关掉当前文档并打开这个新文件。
+    /// 打包失败或新文件打不开时，当前文档保持不变。
+    pub fn save_as_package(&mut self, file: &Path) -> Result<DocumentView, Error> {
+        let root = self
+            .root
+            .clone()
+            .ok_or_else(|| Error::new("没有打开的包"))?;
+        if self.manifest.is_none() {
+            return Err(Error::new("没有打开的包"));
+        }
+        let archive = et_core::archive::pack_package(&root, file)?;
+        self.replace_with_archive(archive)
     }
 
     /// 丢掉工作副本。退出时调用，避免临时目录留下来。
@@ -207,6 +215,16 @@ impl Session {
             .as_ref()
             .ok_or_else(|| Error::new("没有打开的包"))?;
         document_view(root, self.archive.as_deref(), manifest, self.dirty)
+    }
+
+    fn replace_with_archive(&mut self, archive: PathBuf) -> Result<DocumentView, Error> {
+        let mut work = WorkDir::create()?;
+        et_core::archive::unpack_package(&archive, work.path())?;
+        let opened = disk::open_package(work.path())?;
+        let view = document_view(work.path(), Some(&archive), &opened.manifest, false)?;
+        let root = work.disarm();
+        self.adopt(root, opened.manifest, Some(archive), false);
+        Ok(view)
     }
 
     fn adopt(
@@ -480,6 +498,45 @@ mod tests {
         assert_eq!(opened.metadata.user_area_bytes, None);
         assert_ne!(opened.root, root);
         assert!(opened.archive.as_ref().unwrap().ends_with("Untitled.etpk"));
+    }
+
+    #[test]
+    fn save_as_closes_the_previous_file_and_opens_the_new_one() {
+        let tmp = TempDir::new();
+        let mut session = Session::new();
+        let created = session.create_package(false).unwrap();
+        let first_root = created.root.clone();
+        let first = tmp.path().join("first.etpk");
+        session.save_package(&first).unwrap();
+
+        let missing = tmp.path().join("missing").join("second.etpk");
+        let err = session.save_as_package(&missing).unwrap_err();
+        assert!(err.message().contains("上级目录不存在"));
+        assert_eq!(session.root.as_ref().unwrap().to_str().unwrap(), first_root);
+        assert!(session.archive.as_ref().unwrap().ends_with("first.etpk"));
+        assert!(!missing.exists());
+
+        let second = tmp.path().join("second.etpk");
+        let saved = session.save_as_package(&second).unwrap();
+        assert!(!saved.dirty);
+        assert!(!session.dirty);
+        assert_ne!(saved.root, first_root);
+        assert!(!std::path::Path::new(&first_root).exists());
+        assert!(first.is_file());
+        assert!(second.is_file());
+        assert!(saved.archive.as_ref().unwrap().ends_with("second.etpk"));
+        assert!(std::path::Path::new(&saved.root)
+            .join("manifest.json")
+            .is_file());
+        assert_eq!(
+            session.archive.as_ref().unwrap().to_str().unwrap(),
+            saved.archive.as_deref().unwrap()
+        );
+
+        let mut other = Session::new();
+        let opened = other.open_package(&second, false).unwrap();
+        assert_eq!(opened.metadata.name, "Untitled");
+        assert!(opened.archive.as_ref().unwrap().ends_with("second.etpk"));
     }
 
     #[test]

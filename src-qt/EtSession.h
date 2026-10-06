@@ -81,6 +81,8 @@ bool openPackage(const QString &archiveFile, bool discardUnsaved, QString *viewJ
 
 bool savePackage(const QString &archiveFile, QString *viewJson, QString *error);
 
+bool savePackageAs(const QString &archiveFile, QString *viewJson, QString *error);
+
 void closePackage();
 
 bool previewImport(const QString &sourceFile, QString *previewJson, QString *error);

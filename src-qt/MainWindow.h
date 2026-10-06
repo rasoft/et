@@ -27,6 +27,7 @@ private slots:
     void openPackage();
     void importPackage();
     void savePackage();
+    void savePackageAs();
     void newPartition();
     void deletePartition();
     void download();
@@ -45,7 +46,7 @@ private:
     bool confirmReplace(const QString &title, const QString &question, bool *discardUnsaved);
     bool confirmSaveOrDiscard(const QString &title);
     bool saveToArchive(const QString &path);
-    QString askArchivePath();
+    QString askArchivePath(const QString &title);
     QString browseDirectory() const;
     void showWarning(const QString &title, const QString &text);
 
@@ -53,6 +54,7 @@ private:
     QAction *m_openPackage = nullptr;
     QAction *m_importPackage = nullptr;
     QAction *m_savePackage = nullptr;
+    QAction *m_savePackageAs = nullptr;
     QAction *m_quit = nullptr;
     QAction *m_newPartition = nullptr;
     QAction *m_deletePartition = nullptr;

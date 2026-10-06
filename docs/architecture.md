@@ -102,7 +102,7 @@ docs/               设计文档
 - `create_package(metadata)` — 在临时目录创建工作副本
 - `open_package(file) -> DocumentView` — 把 etpk 文件解包到临时目录
 - `save(file)` — 把工作副本打包成 etpk 文件，不关闭文档
-- `save_as(file)`
+- `save_as(file)` — 打包到另一个 etpk 文件，然后关掉当前文档并打开新文件
 - `set_metadata(patch)`
 - `add_partition(name, sizeBytes)`
 - `remove_partition(id)`
